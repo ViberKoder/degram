@@ -11,17 +11,14 @@ import {
   Post,
   hashToHsl,
   isValidHandle,
-  loadAccounts,
   loadLocalWallet,
-  loadPosts,
   clearLocalWallet,
   normalizeHandle,
-  saveAccounts,
-  savePosts,
 } from './utils/storage'
 import './styles/index.css'
 import CreateWalletModal from './components/CreateWalletModal'
 import WalletView from './components/WalletView'
+import { createPost as apiCreatePost, getAccountByAddress, getFeed, getRecommended, upsertAccount } from './services/degramApi'
 
 function formatAddress(addr: string) {
   if (!addr) return ''
@@ -37,42 +34,67 @@ function nowTimeLabel(ts: number) {
   return new Date(ts).toLocaleDateString()
 }
 
-function useActiveAccount(accounts: Record<string, Account>, address: string) {
-  return address ? accounts[address] ?? null : null
-}
-
 function InnerApp() {
   const tonAddress = useTonAddress(true)
   const [tonConnectUI] = useTonConnectUI()
 
-  const [accounts, setAccountsState] = useState<Record<string, Account>>({})
+  const [activeAccount, setActiveAccount] = useState<Account | null>(null)
   const [posts, setPostsState] = useState<Post[]>([])
+  const [recommended, setRecommended] = useState<Array<{ handle: string; count: number }>>([])
+  const [accountLoaded, setAccountLoaded] = useState(false)
   const [view, setView] = useState<'feed' | 'profile' | 'explore' | 'wallet'>('feed')
   const [localWallet, setLocalWallet] = useState<LocalWallet | null>(() => loadLocalWallet())
 
   const tonConnected = tonAddress.trim().length > 0
   const activeAddress = tonConnected ? tonAddress : localWallet?.address ?? ''
 
-  const activeAccount = useActiveAccount(accounts, activeAddress)
-
   const [showCreateWalletModal, setShowCreateWalletModal] = useState(false)
 
   useEffect(() => {
     // For MVP all state is kept locally in the browser.
-    setAccountsState(loadAccounts())
-    setPostsState(loadPosts())
     setLocalWallet(loadLocalWallet())
   }, [])
 
   useEffect(() => {
-    if (!activeAddress) setView('feed')
-  }, [activeAddress])
+    if (!activeAddress) {
+      setAccountLoaded(false)
+      setActiveAccount(null)
+      setPostsState([])
+      setRecommended([])
+      setView('feed')
+      return
+    }
 
-  const accountHandleToColor = useMemo(() => {
-    const map: Record<string, string> = {}
-    for (const a of Object.values(accounts)) map[a.handle] = a.avatarColor
-    return map
-  }, [accounts])
+    let cancelled = false
+
+    const load = async () => {
+      setAccountLoaded(false)
+      try {
+        const [acc, feed, top] = await Promise.all([
+          getAccountByAddress(activeAddress),
+          getFeed({ limit: 50, offset: 0 }),
+          getRecommended({ limit: 6 }),
+        ])
+
+        if (cancelled) return
+        setActiveAccount(acc)
+        setPostsState(feed)
+        setRecommended(top)
+        setAccountLoaded(true)
+      } catch (e) {
+        if (cancelled) return
+        setActiveAccount(null)
+        setPostsState([])
+        setRecommended([])
+        setAccountLoaded(true)
+      }
+    }
+
+    load()
+    return () => {
+      cancelled = true
+    }
+  }, [activeAddress])
 
   const handleDisconnectTon = async () => {
     await tonConnectUI.disconnect()
@@ -92,36 +114,31 @@ function InnerApp() {
     }
   }
 
-  const upsertAccount = (acc: Account) => {
-    const next = { ...accounts, [acc.address]: acc }
-    setAccountsState(next)
-    saveAccounts(next)
+  const refreshFeed = () => {
+    void (async () => {
+      const feed = await getFeed({ limit: 50, offset: 0 })
+      setPostsState(feed)
+      const top = await getRecommended({ limit: 6 })
+      setRecommended(top)
+    })()
   }
 
-  const createPost = (content: string) => {
+  const handleCreatePost = (content: string) => {
     const trimmed = content.trim()
     if (!trimmed) return
     if (!activeAddress) return
-    const authorHandle = activeAccount?.handle ?? 'unknown'
-    const id =
-      typeof crypto !== 'undefined' && 'randomUUID' in crypto
-        ? crypto.randomUUID()
-        : `${Date.now()}_${Math.random().toString(16).slice(2)}`
-    const post: Post = {
-      id,
-      authorAddress: activeAddress,
-      authorHandle,
-      content: trimmed,
-      createdAt: Date.now(),
-    }
-    const nextPosts = [post, ...posts]
-    setPostsState(nextPosts)
-    savePosts(nextPosts)
-  }
+    if (!activeAccount) return
 
-  const deleteLocalPosts = () => {
-    setPostsState([])
-    savePosts([])
+    // fire-and-refresh (MVP)
+    void (async () => {
+      await apiCreatePost({
+        authorAddress: activeAddress,
+        authorHandle: activeAccount.handle,
+        content: trimmed,
+      })
+      await getFeed({ limit: 50, offset: 0 }).then((feed) => setPostsState(feed))
+      await getRecommended({ limit: 6 }).then((top) => setRecommended(top))
+    })()
   }
 
   const [regHandle, setRegHandle] = useState('')
@@ -139,31 +156,26 @@ function InnerApp() {
     }
 
     const displayName = regDisplayName.trim() || handle
-
-    const handleTaken = Object.values(accounts).some((a) => a.handle === handle)
-    if (handleTaken) {
-      setRegError('Это имя пользователя уже занято в этом браузере.')
-      return
-    }
-
-    const acc: Account = {
-      address: activeAddress,
-      handle,
-      displayName,
-      avatarColor: hashToHsl(handle),
-      createdAt: Date.now(),
-    }
-    upsertAccount(acc)
+    void (async () => {
+      try {
+        const acc = await upsertAccount({
+          address: activeAddress,
+          handle,
+          displayName,
+          avatarColor: hashToHsl(handle),
+        })
+        setActiveAccount(acc)
+        setAccountLoaded(true)
+      } catch (e) {
+        const payload = (e as any).payload
+        if (payload?.error === 'handle_taken') {
+          setRegError('Это имя пользователя уже занято.')
+          return
+        }
+        setRegError((e as Error).message || 'Не удалось создать аккаунт.')
+      }
+    })()
   }
-
-  const trending = useMemo(() => {
-    const counts: Record<string, number> = {}
-    for (const p of posts) counts[p.authorHandle] = (counts[p.authorHandle] ?? 0) + 1
-    return Object.entries(counts)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 6)
-      .map(([handle, count]) => ({ handle, count }))
-  }, [posts])
 
   if (!activeAddress) {
     return (
@@ -199,7 +211,22 @@ function InnerApp() {
     )
   }
 
-  if (activeAddress && !activeAccount) {
+  if (activeAddress && !accountLoaded) {
+    return (
+      <div className="container">
+        <div style={{ paddingTop: 48, paddingBottom: 24 }}>
+          <div className="panel" style={{ padding: 18 }}>
+            <div className="auth-title">Загрузка…</div>
+            <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
+              Загружаем аккаунт и ленту.
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (activeAddress && accountLoaded && !activeAccount) {
     return (
       <div className="container">
         <div className="panel" style={{ marginTop: 16 }}>
@@ -252,6 +279,8 @@ function InnerApp() {
   }
 
   const myPosts = posts.filter((p) => p.authorAddress === activeAddress)
+
+  const getAccent = (handle: string) => hashToHsl(handle)
 
   return (
     <div>
@@ -338,11 +367,11 @@ function InnerApp() {
                       </div>
                     </div>
                   </div>
-                  <button className="btn" onClick={deleteLocalPosts} type="button">
-                    Очистить ленту
+                  <button className="btn" onClick={refreshFeed} type="button">
+                    Обновить
                   </button>
                 </div>
-                <Composer onSubmit={createPost} />
+                <Composer onSubmit={handleCreatePost} />
               </div>
             )}
 
@@ -374,7 +403,7 @@ function InnerApp() {
                       <PostCard
                         key={p.id}
                         post={p}
-                        accent={accountHandleToColor[p.authorHandle] ?? 'hsl(180 85% 55%)'}
+                        accent={getAccent(p.authorHandle)}
                         timeLabel={nowTimeLabel(p.createdAt)}
                       />
                     ))}
@@ -392,16 +421,16 @@ function InnerApp() {
                         <h3 style={{ margin: 0, padding: 12 }}>Рекомендуемые</h3>
                         <div className="mini">
                           <div className="mono muted" style={{ marginBottom: 8 }}>
-                            Самые активные аккаунты (в этом браузере)
+                            Самые активные аккаунты (за 7 дней)
                           </div>
                           <div style={{ display: 'grid', gap: 8 }}>
-                            {trending.map((t) => (
+                            {recommended.map((t) => (
                               <div key={t.handle} style={{ display: 'flex', justifyContent: 'space-between' }}>
                                 <b>@{t.handle}</b>
                                 <span className="muted mono">{t.count}</span>
                               </div>
                             ))}
-                            {trending.length === 0 && <div className="muted">Пока нет данных.</div>}
+                            {recommended.length === 0 && <div className="muted">Пока нет данных.</div>}
                           </div>
                         </div>
                       </div>
@@ -410,7 +439,7 @@ function InnerApp() {
                       <PostCard
                         key={p.id}
                         post={p}
-                        accent={accountHandleToColor[p.authorHandle] ?? 'hsl(180 85% 55%)'}
+                        accent={getAccent(p.authorHandle)}
                         timeLabel={nowTimeLabel(p.createdAt)}
                       />
                     ))}
@@ -423,11 +452,11 @@ function InnerApp() {
           <aside className="panel side">
             <h3>Сейчас в тренде</h3>
             <div className="mini">
-              {trending.length === 0 ? (
+              {recommended.length === 0 ? (
                 <div className="muted">Нет постов, чтобы посчитать тренды.</div>
               ) : (
                 <div style={{ display: 'grid', gap: 10 }}>
-                  {trending.slice(0, 5).map((t) => (
+                  {recommended.slice(0, 5).map((t) => (
                     <div key={t.handle} style={{ display: 'flex', justifyContent: 'space-between' }}>
                       <b>@{t.handle}</b>
                       <span className="muted mono">{t.count}</span>
@@ -438,7 +467,7 @@ function InnerApp() {
             </div>
             <div className="mini">
               <div className="muted" style={{ lineHeight: 1.5 }}>
-                MVP пока без backend: все данные в <span className="mono">localStorage</span>.
+                MVP теперь читает аккаунты/посты с backend (JSON storage).
                 Дальше добавим сеть/контент-слой/децентрализацию + TON DNS.
               </div>
             </div>
