@@ -60,9 +60,14 @@ export default function WalletView(props: {
           <div className="mini">
             <div style={{ fontWeight: 900, marginBottom: 6 }}>Recovery phrase</div>
             <div className="small muted" style={{ marginBottom: 10 }}>
-              Seed хранится зашифрованно в этом браузере.
+              Fast mode: seed хранится локально в этом браузере без пароля (unencrypted).
             </div>
-            <button className="btn primary" onClick={() => setShowSeed(true)} type="button">
+            <button
+              className="btn primary"
+              onClick={() => setShowSeed(true)}
+              type="button"
+              disabled={props.localWallet?.seedPhrase == null}
+            >
               Показать seed
             </button>
           </div>
@@ -93,7 +98,7 @@ export default function WalletView(props: {
       {showSeed && props.localWallet && (
         <RevealSeedModal
           title="Recovery phrase (seed)"
-          encryptedSeed={props.localWallet.encryptedSeed}
+          seedPhrase={props.localWallet.seedPhrase ?? ''}
           onClose={() => setShowSeed(false)}
         />
       )}

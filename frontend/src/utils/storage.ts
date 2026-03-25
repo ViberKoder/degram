@@ -10,12 +10,8 @@ export type LocalWallet = {
   address: string
   workchain: number
   kind: 'v4r2'
-  encryptedSeed: {
-    ciphertextB64: string
-    ivB64: string
-    saltB64: string
-    iterations: number
-  }
+  // Passwordless fast MVP: store seed phrase in browser localStorage (unencrypted).
+  seedPhrase?: string
   createdAt: number
 }
 
