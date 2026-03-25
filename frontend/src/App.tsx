@@ -7,16 +7,21 @@ import {
 } from '@tonconnect/ui-react'
 import {
   Account,
+  LocalWallet,
   Post,
   hashToHsl,
   isValidHandle,
   loadAccounts,
+  loadLocalWallet,
   loadPosts,
+  clearLocalWallet,
   normalizeHandle,
   saveAccounts,
   savePosts,
 } from './utils/storage'
 import './styles/index.css'
+import CreateWalletModal from './components/CreateWalletModal'
+import WalletView from './components/WalletView'
 
 function formatAddress(addr: string) {
   if (!addr) return ''
@@ -37,24 +42,31 @@ function useActiveAccount(accounts: Record<string, Account>, address: string) {
 }
 
 function InnerApp() {
-  const address = useTonAddress(true)
+  const tonAddress = useTonAddress(true)
   const [tonConnectUI] = useTonConnectUI()
 
   const [accounts, setAccountsState] = useState<Record<string, Account>>({})
   const [posts, setPostsState] = useState<Post[]>([])
-  const [view, setView] = useState<'feed' | 'profile' | 'explore'>('feed')
+  const [view, setView] = useState<'feed' | 'profile' | 'explore' | 'wallet'>('feed')
+  const [localWallet, setLocalWallet] = useState<LocalWallet | null>(() => loadLocalWallet())
 
-  const activeAccount = useActiveAccount(accounts, address)
+  const tonConnected = tonAddress.trim().length > 0
+  const activeAddress = tonConnected ? tonAddress : localWallet?.address ?? ''
+
+  const activeAccount = useActiveAccount(accounts, activeAddress)
+
+  const [showCreateWalletModal, setShowCreateWalletModal] = useState(false)
 
   useEffect(() => {
     // For MVP all state is kept locally in the browser.
     setAccountsState(loadAccounts())
     setPostsState(loadPosts())
+    setLocalWallet(loadLocalWallet())
   }, [])
 
   useEffect(() => {
-    if (!address) setView('feed')
-  }, [address])
+    if (!activeAddress) setView('feed')
+  }, [activeAddress])
 
   const accountHandleToColor = useMemo(() => {
     const map: Record<string, string> = {}
@@ -62,8 +74,22 @@ function InnerApp() {
     return map
   }, [accounts])
 
-  const handleDisconnect = async () => {
+  const handleDisconnectTon = async () => {
     await tonConnectUI.disconnect()
+  }
+
+  const handleClearLocalWallet = () => {
+    clearLocalWallet()
+    setLocalWallet(null)
+    setView('feed')
+  }
+
+  const handleAuthDisconnect = async () => {
+    if (tonConnected) {
+      await handleDisconnectTon()
+    } else {
+      handleClearLocalWallet()
+    }
   }
 
   const upsertAccount = (acc: Account) => {
@@ -75,7 +101,7 @@ function InnerApp() {
   const createPost = (content: string) => {
     const trimmed = content.trim()
     if (!trimmed) return
-    if (!address) return
+    if (!activeAddress) return
     const authorHandle = activeAccount?.handle ?? 'unknown'
     const id =
       typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -83,7 +109,7 @@ function InnerApp() {
         : `${Date.now()}_${Math.random().toString(16).slice(2)}`
     const post: Post = {
       id,
-      authorAddress: address,
+      authorAddress: activeAddress,
       authorHandle,
       content: trimmed,
       createdAt: Date.now(),
@@ -103,7 +129,7 @@ function InnerApp() {
   const [regError, setRegError] = useState<string | null>(null)
 
   const submitRegistration = () => {
-    if (!address) return
+    if (!activeAddress) return
     setRegError(null)
 
     const handle = normalizeHandle(regHandle)
@@ -121,7 +147,7 @@ function InnerApp() {
     }
 
     const acc: Account = {
-      address,
+      address: activeAddress,
       handle,
       displayName,
       avatarColor: hashToHsl(handle),
@@ -139,7 +165,7 @@ function InnerApp() {
       .map(([handle, count]) => ({ handle, count }))
   }, [posts])
 
-  if (!address) {
+  if (!activeAddress) {
     return (
       <div className="container">
         <div style={{ paddingTop: 48, paddingBottom: 24, display: 'grid', gap: 18 }}>
@@ -149,16 +175,31 @@ function InnerApp() {
               Подключи TON-кошелёк через <span className="mono">TON Connect</span> — и создай аккаунт
               прямо по адресу кошелька. (История и лента в MVP пока хранятся локально.)
             </div>
-            <div style={{ marginTop: 18, display: 'flex', justifyContent: 'center' }}>
-              <TonConnectButton />
+            <div style={{ marginTop: 18, display: 'grid', gap: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'center' }}>
+                <TonConnectButton />
+              </div>
+              <button
+                className="btn primary"
+                onClick={() => setShowCreateWalletModal(true)}
+                type="button"
+              >
+                Создать новый кошелёк (self-custody)
+              </button>
             </div>
           </div>
         </div>
+        {showCreateWalletModal && (
+          <CreateWalletModal
+            onClose={() => setShowCreateWalletModal(false)}
+            onCreated={() => setLocalWallet(loadLocalWallet())}
+          />
+        )}
       </div>
     )
   }
 
-  if (address && !activeAccount) {
+  if (activeAddress && !activeAccount) {
     return (
       <div className="container">
         <div className="panel" style={{ marginTop: 16 }}>
@@ -166,7 +207,7 @@ function InnerApp() {
             <div>
               <div className="auth-title">Создай аккаунт</div>
               <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
-                Ты подключил кошелёк <span className="mono">{formatAddress(address)}</span>. Заполни
+                Ты подключил кошелёк <span className="mono">{formatAddress(activeAddress)}</span>. Заполни
                 @handle — и ты появишься в соцсети.
               </div>
             </div>
@@ -192,7 +233,7 @@ function InnerApp() {
             {regError && <div className="error">{regError}</div>}
 
             <div className="row">
-              <button className="btn danger" onClick={handleDisconnect} type="button">
+              <button className="btn danger" onClick={handleAuthDisconnect} type="button">
                 Отключить кошелёк
               </button>
               <button
@@ -210,7 +251,7 @@ function InnerApp() {
     )
   }
 
-  const myPosts = posts.filter((p) => p.authorAddress === address)
+  const myPosts = posts.filter((p) => p.authorAddress === activeAddress)
 
   return (
     <div>
@@ -229,10 +270,10 @@ function InnerApp() {
                 @{activeAccount!.handle}
               </div>
               <div className="muted mono" style={{ fontSize: 12 }}>
-                {formatAddress(address)}
+                {formatAddress(activeAddress)}
               </div>
             </div>
-            <button className="btn" onClick={handleDisconnect} type="button">
+            <button className="btn" onClick={handleAuthDisconnect} type="button">
               Отключить
             </button>
           </div>
@@ -267,10 +308,18 @@ function InnerApp() {
               <span>Профиль</span>
               <span className="muted mono">{myPosts.length}</span>
             </button>
+            <button
+              className={view === 'wallet' ? 'active' : ''}
+              onClick={() => setView('wallet')}
+              type="button"
+            >
+              <span>Wallet</span>
+              <span className="muted mono">{tonConnected ? 'TON' : 'local'}</span>
+            </button>
           </aside>
 
           <main className="panel main">
-            {view !== 'profile' && (
+            {view !== 'profile' && view !== 'wallet' && (
               <div className="composer">
                 <div className="row">
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -297,7 +346,15 @@ function InnerApp() {
               </div>
             )}
 
-            {view === 'profile' ? (
+            {view === 'wallet' ? (
+              <WalletView
+                activeAddress={activeAddress}
+                tonConnected={tonConnected}
+                localWallet={localWallet}
+                onDisconnectTon={handleDisconnectTon}
+                onClearLocalWallet={handleClearLocalWallet}
+              />
+            ) : view === 'profile' ? (
               <div className="feed">
                 <div style={{ padding: 10 }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>

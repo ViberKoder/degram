@@ -280,3 +280,63 @@ a{ color: inherit; text-decoration: none; }
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
 }
 
+.modalOverlay{
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
+}
+.modal{
+  width: 100%;
+  max-width: 720px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(10,14,26,0.78);
+  backdrop-filter: blur(16px);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.modalHeader{
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(255,255,255,0.10);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.modalHeader h2{
+  margin: 0;
+  font-size: 16px;
+  font-weight: 900;
+}
+.modalBody{
+  padding: 16px;
+}
+.seedGrid{
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+@media (max-width: 720px){
+  .seedGrid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.seedWord{
+  padding: 10px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.03);
+  font-weight: 800;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.small{
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
