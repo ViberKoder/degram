@@ -5,7 +5,11 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "migrate": "node migrate-cli.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
   }
 }
 

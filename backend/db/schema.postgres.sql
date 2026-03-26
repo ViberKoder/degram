@@ -1,0 +1,1 @@
+-- Устарело: используйте `backend/db/schema.sql` (актуальная схема под PostgreSQL).

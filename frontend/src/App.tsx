@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   TonConnectButton,
   TonConnectUIProvider,
@@ -7,6 +7,7 @@ import {
 } from '@tonconnect/ui-react'
 import {
   Account,
+  AccountStats,
   LocalWallet,
   Post,
   hashToHsl,
@@ -18,7 +19,24 @@ import {
 import './styles/index.css'
 import CreateWalletModal from './components/CreateWalletModal'
 import WalletView from './components/WalletView'
-import { createPost as apiCreatePost, getAccountByAddress, getFeed, getRecommended, upsertAccount } from './services/degramApi'
+import PostCard from './components/PostCard'
+import WalletHoldingsCard from './components/WalletHoldingsCard'
+import {
+  createPost as apiCreatePost,
+  follow,
+  getAccountByAddress,
+  getAccountByHandle,
+  getAccountStats,
+  getFeed,
+  getFollowStatus,
+  getHomeFeed,
+  getPostsByAddress,
+  getRecommended,
+  likePost,
+  unlikePost,
+  unfollow,
+  upsertAccount,
+} from './services/degramApi'
 
 function formatAddress(addr: string) {
   if (!addr) return ''
@@ -39,19 +57,38 @@ function InnerApp() {
   const [tonConnectUI] = useTonConnectUI()
 
   const [activeAccount, setActiveAccount] = useState<Account | null>(null)
-  const [posts, setPostsState] = useState<Post[]>([])
+  const [posts, setPosts] = useState<Post[]>([])
+  const [nextCursor, setNextCursor] = useState<string | null>(null)
+  const [feedLoading, setFeedLoading] = useState(false)
+  const [feedLoadingMore, setFeedLoadingMore] = useState(false)
+  const [feedMode, setFeedMode] = useState<'home' | 'explore'>('home')
+
   const [recommended, setRecommended] = useState<Array<{ handle: string; count: number }>>([])
   const [accountLoaded, setAccountLoaded] = useState(false)
-  const [view, setView] = useState<'feed' | 'profile' | 'explore' | 'wallet'>('feed')
+  const [view, setView] = useState<'feed' | 'profile' | 'user' | 'wallet'>('feed')
   const [localWallet, setLocalWallet] = useState<LocalWallet | null>(() => loadLocalWallet())
+
+  const [myProfilePosts, setMyProfilePosts] = useState<Post[]>([])
+  const [viewingUserHandle, setViewingUserHandle] = useState<string | null>(null)
+  const [userAccount, setUserAccount] = useState<Account | null>(null)
+  const [userStats, setUserStats] = useState<AccountStats | null>(null)
+  const [userPosts, setUserPosts] = useState<Post[]>([])
+  const [userFollowing, setUserFollowing] = useState(false)
+  const [userProfileLoading, setUserProfileLoading] = useState(false)
+  const [followBusy, setFollowBusy] = useState(false)
+
+  const [replyingTo, setReplyingTo] = useState<Post | null>(null)
+  const [likeBusyId, setLikeBusyId] = useState<string | null>(null)
+
+  const [showCreateWalletModal, setShowCreateWalletModal] = useState(false)
+
+  const [autoRegistering, setAutoRegistering] = useState(false)
+  const [autoRegisterError, setAutoRegisterError] = useState<string | null>(null)
 
   const tonConnected = tonAddress.trim().length > 0
   const activeAddress = tonConnected ? tonAddress : localWallet?.address ?? ''
 
-  const [showCreateWalletModal, setShowCreateWalletModal] = useState(false)
-
   useEffect(() => {
-    // For MVP all state is kept locally in the browser.
     setLocalWallet(loadLocalWallet())
   }, [])
 
@@ -59,42 +96,133 @@ function InnerApp() {
     if (!activeAddress) {
       setAccountLoaded(false)
       setActiveAccount(null)
-      setPostsState([])
+      setPosts([])
+      setNextCursor(null)
       setRecommended([])
       setView('feed')
+      setMyProfilePosts([])
+      setViewingUserHandle(null)
+      setUserAccount(null)
+      setUserStats(null)
+      setUserPosts([])
       return
     }
 
     let cancelled = false
 
-    const load = async () => {
+    const loadAccount = async () => {
       setAccountLoaded(false)
       try {
-        const [acc, feed, top] = await Promise.all([
-          getAccountByAddress(activeAddress),
-          getFeed({ limit: 50, offset: 0 }),
-          getRecommended({ limit: 6 }),
-        ])
-
+        const acc = await getAccountByAddress(activeAddress)
         if (cancelled) return
         setActiveAccount(acc)
-        setPostsState(feed)
-        setRecommended(top)
         setAccountLoaded(true)
-      } catch (e) {
+      } catch {
         if (cancelled) return
         setActiveAccount(null)
-        setPostsState([])
-        setRecommended([])
         setAccountLoaded(true)
       }
     }
 
-    load()
+    void loadAccount()
     return () => {
       cancelled = true
     }
   }, [activeAddress])
+
+  const loadFeed = useCallback(async () => {
+    if (!activeAddress || !activeAccount) return
+    setFeedLoading(true)
+    try {
+      if (feedMode === 'home') {
+        const r = await getHomeFeed({ address: activeAddress, limit: 30, cursor: null })
+        setPosts(r.posts)
+        setNextCursor(r.nextCursor)
+      } else {
+        const r = await getFeed({ limit: 30, offset: 0, viewerAddress: activeAddress })
+        setPosts(r.posts)
+        setNextCursor(r.nextCursor)
+      }
+      const top = await getRecommended({ limit: 8 })
+      setRecommended(top)
+    } catch {
+      setPosts([])
+      setNextCursor(null)
+    } finally {
+      setFeedLoading(false)
+    }
+  }, [activeAddress, activeAccount, feedMode])
+
+  useEffect(() => {
+    if (!activeAddress || !activeAccount) return
+    void loadFeed()
+  }, [activeAddress, activeAccount, feedMode, loadFeed])
+
+  useEffect(() => {
+    if (view !== 'profile' || !activeAddress || !activeAccount) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const r = await getPostsByAddress({
+          address: activeAddress,
+          limit: 80,
+          offset: 0,
+          viewerAddress: activeAddress,
+        })
+        if (!cancelled) setMyProfilePosts(r.posts)
+      } catch {
+        if (!cancelled) setMyProfilePosts([])
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [view, activeAddress, activeAccount])
+
+  useEffect(() => {
+    if (view !== 'user' || !viewingUserHandle || !activeAddress || !activeAccount) return
+    let cancelled = false
+    setUserProfileLoading(true)
+    ;(async () => {
+      try {
+        const acc = await getAccountByHandle(viewingUserHandle)
+        if (cancelled || !acc) {
+          if (!cancelled) {
+            setUserAccount(null)
+            setUserStats(null)
+            setUserPosts([])
+          }
+          return
+        }
+        const [stats, postsRes, fs] = await Promise.all([
+          getAccountStats(acc.address),
+          getPostsByAddress({
+            address: acc.address,
+            limit: 80,
+            offset: 0,
+            viewerAddress: activeAddress,
+          }),
+          getFollowStatus({ followerAddress: activeAddress, followeeAddress: acc.address }),
+        ])
+        if (cancelled) return
+        setUserAccount(acc)
+        setUserStats(stats)
+        setUserPosts(postsRes.posts)
+        setUserFollowing(fs.following)
+      } catch {
+        if (!cancelled) {
+          setUserAccount(null)
+          setUserStats(null)
+          setUserPosts([])
+        }
+      } finally {
+        if (!cancelled) setUserProfileLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [view, viewingUserHandle, activeAddress, activeAccount])
 
   const handleDisconnectTon = async () => {
     await tonConnectUI.disconnect()
@@ -114,13 +242,57 @@ function InnerApp() {
     }
   }
 
-  const refreshFeed = () => {
-    void (async () => {
-      const feed = await getFeed({ limit: 50, offset: 0 })
-      setPostsState(feed)
-      const top = await getRecommended({ limit: 6 })
-      setRecommended(top)
-    })()
+  const patchPostEverywhere = useCallback((postId: string, patch: Partial<Post>) => {
+    const map = (list: Post[]) => list.map((x) => (x.id === postId ? { ...x, ...patch } : x))
+    setPosts((p) => map(p))
+    setMyProfilePosts((p) => map(p))
+    setUserPosts((p) => map(p))
+  }, [])
+
+  const loadMore = async () => {
+    if (!activeAddress || !activeAccount || !nextCursor || feedLoadingMore) return
+    setFeedLoadingMore(true)
+    try {
+      if (feedMode === 'home') {
+        const r = await getHomeFeed({
+          address: activeAddress,
+          limit: 30,
+          cursor: nextCursor,
+        })
+        setPosts((prev) => {
+          const seen = new Set(prev.map((p) => p.id))
+          const merged = [...prev]
+          for (const p of r.posts) {
+            if (!seen.has(p.id)) {
+              seen.add(p.id)
+              merged.push(p)
+            }
+          }
+          return merged
+        })
+        setNextCursor(r.nextCursor)
+      } else {
+        const r = await getFeed({
+          limit: 30,
+          cursor: nextCursor,
+          viewerAddress: activeAddress,
+        })
+        setPosts((prev) => {
+          const seen = new Set(prev.map((p) => p.id))
+          const merged = [...prev]
+          for (const p of r.posts) {
+            if (!seen.has(p.id)) {
+              seen.add(p.id)
+              merged.push(p)
+            }
+          }
+          return merged
+        })
+        setNextCursor(r.nextCursor)
+      }
+    } finally {
+      setFeedLoadingMore(false)
+    }
   }
 
   const handleCreatePost = (content: string) => {
@@ -129,17 +301,72 @@ function InnerApp() {
     if (!activeAddress) return
     if (!activeAccount) return
 
-    // fire-and-refresh (MVP)
     void (async () => {
-      await apiCreatePost({
+      const post = await apiCreatePost({
         authorAddress: activeAddress,
         authorHandle: activeAccount.handle,
-        content: trimmed,
+        content: trimmed.slice(0, 500),
+        replyToPostId: replyingTo?.id ?? null,
       })
-      await getFeed({ limit: 50, offset: 0 }).then((feed) => setPostsState(feed))
-      await getRecommended({ limit: 6 }).then((top) => setRecommended(top))
+      setReplyingTo(null)
+      setPosts((prev) => [post, ...prev.filter((p) => p.id !== post.id)])
+      setMyProfilePosts((prev) => [post, ...prev.filter((p) => p.id !== post.id)])
+      const top = await getRecommended({ limit: 8 })
+      setRecommended(top)
     })()
   }
+
+  function deriveHandle(address: string, attempt: number) {
+    let h = 0
+    for (let i = 0; i < address.length; i++) h = (h * 33 + address.charCodeAt(i)) >>> 0
+    h = (h ^ (attempt * 2654435761)) >>> 0
+    const s = h.toString(36)
+    const handle = `u_${s.slice(0, 12)}`
+    return handle.slice(0, 20).toLowerCase()
+  }
+
+  const autoRegisterNow = async () => {
+    if (!activeAddress) return
+    setAutoRegisterError(null)
+    setAutoRegistering(true)
+    try {
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const handle = deriveHandle(activeAddress, attempt)
+        if (!isValidHandle(handle)) continue
+        const displayName = handle
+        try {
+          const acc = await upsertAccount({
+            address: activeAddress,
+            handle,
+            displayName,
+            avatarColor: hashToHsl(handle),
+          })
+          setActiveAccount(acc)
+          setAccountLoaded(true)
+          return
+        } catch (e) {
+          const payload = (e as any)?.payload
+          if (payload?.error === 'handle_taken') continue
+          throw e
+        }
+      }
+      setAutoRegisterError('Не удалось создать уникальный handle. Попробуй позже.')
+    } catch (e) {
+      setAutoRegisterError((e as Error).message || 'Не удалось создать аккаунт.')
+    } finally {
+      setAutoRegistering(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!activeAddress) return
+    if (!accountLoaded) return
+    if (activeAccount) return
+    if (autoRegistering) return
+    if (autoRegisterError) return
+    void autoRegisterNow()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeAddress, accountLoaded, activeAccount, autoRegistering, autoRegisterError])
 
   const [regHandle, setRegHandle] = useState('')
   const [regDisplayName, setRegDisplayName] = useState('')
@@ -177,6 +404,87 @@ function InnerApp() {
     })()
   }
 
+  const openProfile = (handle: string, _address: string) => {
+    if (!activeAccount) return
+    if (normalizeHandle(handle) === normalizeHandle(activeAccount.handle)) {
+      setView('profile')
+      setViewingUserHandle(null)
+      return
+    }
+    setView('user')
+    setViewingUserHandle(normalizeHandle(handle))
+  }
+
+  const handleToggleLike = async (post: Post) => {
+    if (!activeAddress) return
+    const liked = Boolean(post.likedByViewer)
+    setLikeBusyId(post.id)
+    try {
+      if (liked) {
+        await unlikePost({ postId: post.id, walletAddress: activeAddress })
+        patchPostEverywhere(post.id, {
+          likedByViewer: false,
+          likesCount: Math.max(0, (post.likesCount ?? 0) - 1),
+        })
+      } else {
+        await likePost({ postId: post.id, walletAddress: activeAddress })
+        patchPostEverywhere(post.id, {
+          likedByViewer: true,
+          likesCount: (post.likesCount ?? 0) + 1,
+        })
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setLikeBusyId(null)
+    }
+  }
+
+  const toggleFollowUser = async () => {
+    if (!activeAddress || !activeAccount || !userAccount) return
+    if (userAccount.address === activeAddress) return
+    setFollowBusy(true)
+    try {
+      if (userFollowing) {
+        await unfollow({ followerAddress: activeAddress, followeeAddress: userAccount.address })
+        setUserFollowing(false)
+        if (userStats) {
+          setUserStats({
+            ...userStats,
+            followersCount: Math.max(0, userStats.followersCount - 1),
+          })
+        }
+      } else {
+        await follow({ followerAddress: activeAddress, followeeAddress: userAccount.address })
+        setUserFollowing(true)
+        if (userStats) {
+          setUserStats({
+            ...userStats,
+            followersCount: userStats.followersCount + 1,
+          })
+        }
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setFollowBusy(false)
+    }
+  }
+
+  const followFromRecommended = async (handle: string) => {
+    if (!activeAddress) return
+    const acc = await getAccountByHandle(handle)
+    if (!acc || acc.address === activeAddress) return
+    try {
+      await follow({ followerAddress: activeAddress, followeeAddress: acc.address })
+      void loadFeed()
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const getAccent = (handle: string) => hashToHsl(handle)
+
   if (!activeAddress) {
     return (
       <div className="container">
@@ -184,8 +492,8 @@ function InnerApp() {
           <div className="panel" style={{ padding: 18 }}>
             <div className="auth-title">Добро пожаловать в Degram</div>
             <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
-              Подключи TON-кошелёк через <span className="mono">TON Connect</span> — и создай аккаунт
-              прямо по адресу кошелька. (История и лента в MVP пока хранятся локально.)
+              Подключи TON-кошелёк через <span className="mono">TON Connect</span> или создай кошелёк прямо здесь —
+              аккаунт и лента хранятся на сервере Degram.
             </div>
             <div style={{ marginTop: 18, display: 'grid', gap: 12 }}>
               <div style={{ display: 'flex', justifyContent: 'center' }}>
@@ -218,7 +526,7 @@ function InnerApp() {
           <div className="panel" style={{ padding: 18 }}>
             <div className="auth-title">Загрузка…</div>
             <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
-              Загружаем аккаунт и ленту.
+              Подключаемся к API и проверяем аккаунт.
             </div>
           </div>
         </div>
@@ -229,58 +537,29 @@ function InnerApp() {
   if (activeAddress && accountLoaded && !activeAccount) {
     return (
       <div className="container">
-        <div className="panel" style={{ marginTop: 16 }}>
-          <div className="auth-wrap">
-            <div>
-              <div className="auth-title">Создай аккаунт</div>
-              <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
-                Ты подключил кошелёк <span className="mono">{formatAddress(activeAddress)}</span>. Заполни
-                @handle — и ты появишься в соцсети.
+        <div className="panel" style={{ marginTop: 16, padding: 18 }}>
+          <div className="auth-title">Создаём аккаунт…</div>
+          <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
+            Мы автоматически сгенерируем @handle на базе адреса кошелька и сразу покажем витрину ваших NFT, jettons и DNS.
+          </div>
+
+          {autoRegisterError && (
+            <div style={{ marginTop: 14, display: 'grid', gap: 12 }}>
+              <div className="error">{autoRegisterError}</div>
+              <div className="row">
+                <button className="btn danger" onClick={handleAuthDisconnect} type="button">
+                  Отключить
+                </button>
+                <button className="btn primary" onClick={() => void autoRegisterNow()} type="button" disabled={autoRegistering}>
+                  {autoRegistering ? 'Повтор…' : 'Повторить'}
+                </button>
               </div>
             </div>
-
-            <div className="field">
-              <label>Имя пользователя (@handle)</label>
-              <input
-                value={regHandle}
-                onChange={(e) => setRegHandle(e.target.value)}
-                placeholder="@viber_koder"
-              />
-            </div>
-
-            <div className="field">
-              <label>Отображаемое имя</label>
-              <input
-                value={regDisplayName}
-                onChange={(e) => setRegDisplayName(e.target.value)}
-                placeholder="ViberKoder"
-              />
-            </div>
-
-            {regError && <div className="error">{regError}</div>}
-
-            <div className="row">
-              <button className="btn danger" onClick={handleAuthDisconnect} type="button">
-                Отключить кошелёк
-              </button>
-              <button
-                className="btn primary"
-                onClick={submitRegistration}
-                type="button"
-                disabled={!regHandle.trim()}
-              >
-                Создать аккаунт
-              </button>
-            </div>
-          </div>
+          )}
         </div>
       </div>
     )
   }
-
-  const myPosts = posts.filter((p) => p.authorAddress === activeAddress)
-
-  const getAccent = (handle: string) => hashToHsl(handle)
 
   return (
     <div>
@@ -290,20 +569,34 @@ function InnerApp() {
             <div className="brand-mark" />
             <div className="brand-title">
               Degram
-              <small className="mono">TON social MVP</small>
+              <small className="mono">TON social</small>
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <div style={{ textAlign: 'right' }}>
-              <div style={{ fontWeight: 850, lineHeight: 1.1 }}>
-                @{activeAccount!.handle}
-              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setView('profile')
+                  setViewingUserHandle(null)
+                }}
+                style={{
+                  border: 'none',
+                  background: 'transparent',
+                  padding: 0,
+                  cursor: 'pointer',
+                  color: 'inherit',
+                  font: 'inherit',
+                }}
+              >
+                <div style={{ fontWeight: 850, lineHeight: 1.1 }}>@{activeAccount!.handle}</div>
+              </button>
               <div className="muted mono" style={{ fontSize: 12 }}>
                 {formatAddress(activeAddress)}
               </div>
             </div>
             <button className="btn" onClick={handleAuthDisconnect} type="button">
-              Отключить
+              Выйти
             </button>
           </div>
         </div>
@@ -318,24 +611,19 @@ function InnerApp() {
               onClick={() => setView('feed')}
               type="button"
             >
-              <span>Лента</span>
+              <span>Главная</span>
               <span className="muted mono">{posts.length}</span>
             </button>
             <button
-              className={view === 'explore' ? 'active' : ''}
-              onClick={() => setView('explore')}
-              type="button"
-            >
-              <span>Рекомендации</span>
-              <span className="muted mono">TOP</span>
-            </button>
-            <button
               className={view === 'profile' ? 'active' : ''}
-              onClick={() => setView('profile')}
+              onClick={() => {
+                setView('profile')
+                setViewingUserHandle(null)
+              }}
               type="button"
             >
               <span>Профиль</span>
-              <span className="muted mono">{myPosts.length}</span>
+              <span className="muted mono">{myProfilePosts.length || '—'}</span>
             </button>
             <button
               className={view === 'wallet' ? 'active' : ''}
@@ -348,33 +636,6 @@ function InnerApp() {
           </aside>
 
           <main className="panel main">
-            {view !== 'profile' && view !== 'wallet' && (
-              <div className="composer">
-                <div className="row">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <div
-                      className="avatar"
-                      style={{
-                        background: `linear-gradient(135deg, ${activeAccount!.avatarColor}, rgba(255,255,255,0.08))`,
-                      }}
-                    >
-                      @{activeAccount!.handle.slice(0, 1)}
-                    </div>
-                    <div>
-                      <div style={{ fontWeight: 900 }}>{activeAccount!.displayName}</div>
-                      <div className="muted mono" style={{ fontSize: 13 }}>
-                        @{activeAccount!.handle}
-                      </div>
-                    </div>
-                  </div>
-                  <button className="btn" onClick={refreshFeed} type="button">
-                    Обновить
-                  </button>
-                </div>
-                <Composer onSubmit={handleCreatePost} />
-              </div>
-            )}
-
             {view === 'wallet' ? (
               <WalletView
                 activeAddress={activeAddress}
@@ -385,81 +646,260 @@ function InnerApp() {
               />
             ) : view === 'profile' ? (
               <div className="feed">
-                <div style={{ padding: 10 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <div>
-                      <div style={{ fontSize: 20, fontWeight: 950 }}>{activeAccount!.displayName}</div>
-                      <div className="muted mono">@{activeAccount!.handle}</div>
-                    </div>
-                    <div className="mono muted">posts: {myPosts.length}</div>
+                <div className="profile-hero">
+                  <div>
+                    <div style={{ fontSize: 22, fontWeight: 950 }}>{activeAccount!.displayName}</div>
+                    <div className="muted mono">@{activeAccount!.handle}</div>
+                    <ProfileStats address={activeAddress} />
                   </div>
                 </div>
-                <div style={{ marginTop: 8 }} />
-                {myPosts.length === 0 ? (
-                  <EmptyState text="Пока нет постов. Создай первый в «Ленте»." />
-                ) : (
-                  <div>
-                    {myPosts.map((p) => (
+                <WalletHoldingsCard address={activeAddress} />
+                <div style={{ padding: '0 12px 12px' }}>
+                  <div className="muted" style={{ marginBottom: 8 }}>
+                    Ваши посты
+                  </div>
+                  {myProfilePosts.length === 0 ? (
+                    <EmptyState text="Пока нет постов. Напишите что-нибудь на главной." />
+                  ) : (
+                    myProfilePosts.map((p) => (
                       <PostCard
                         key={p.id}
                         post={p}
                         accent={getAccent(p.authorHandle)}
                         timeLabel={nowTimeLabel(p.createdAt)}
+                        viewerAddress={activeAddress}
+                        isSelf
+                        onOpenProfile={openProfile}
+                        onReply={(post) => {
+                          setView('feed')
+                          setReplyingTo(post)
+                        }}
+                        onToggleLike={handleToggleLike}
+                        likeBusy={likeBusyId === p.id}
                       />
-                    ))}
-                  </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            ) : view === 'user' ? (
+              <div className="feed">
+                <div style={{ padding: '8px 12px 0' }}>
+                  <button type="button" className="btn ghost" onClick={() => setView('feed')}>
+                    ← Назад в ленту
+                  </button>
+                </div>
+                {userProfileLoading && <div className="feed-loading">Загрузка профиля…</div>}
+                {!userProfileLoading && !userAccount && (
+                  <EmptyState text="Пользователь не найден." />
+                )}
+                {userAccount && userStats && (
+                  <>
+                    <div className="profile-hero">
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <div
+                          className="avatar"
+                          style={{
+                            width: 48,
+                            height: 48,
+                            fontSize: 18,
+                            background: `linear-gradient(135deg, ${userAccount.avatarColor}, rgba(255,255,255,0.08))`,
+                          }}
+                        >
+                          {userAccount.handle.slice(0, 1).toUpperCase()}
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 22, fontWeight: 950 }}>{userAccount.displayName}</div>
+                          <div className="muted mono">@{userAccount.handle}</div>
+                        </div>
+                      </div>
+                      {userAccount.address !== activeAddress && (
+                        <button
+                          type="button"
+                          className={`btn primary ${userFollowing ? '' : ''}`}
+                          onClick={() => void toggleFollowUser()}
+                          disabled={followBusy}
+                        >
+                          {userFollowing ? 'Вы подписаны' : 'Подписаться'}
+                        </button>
+                      )}
+                    </div>
+                    <div className="profile-hero" style={{ borderBottom: 'none', paddingTop: 0 }}>
+                      <div className="profile-stats">
+                        <span>
+                          <b>{userStats.postsCount}</b> постов
+                        </span>
+                        <span>
+                          <b>{userStats.followingCount}</b> подписок
+                        </span>
+                        <span>
+                          <b>{userStats.followersCount}</b> подписчиков
+                        </span>
+                      </div>
+                    </div>
+                    <WalletHoldingsCard address={userAccount.address} />
+                    <div style={{ padding: '0 12px 12px' }}>
+                      {userPosts.length === 0 ? (
+                        <EmptyState text="У пользователя пока нет постов." />
+                      ) : (
+                        userPosts.map((p) => (
+                          <PostCard
+                            key={p.id}
+                            post={p}
+                            accent={getAccent(p.authorHandle)}
+                            timeLabel={nowTimeLabel(p.createdAt)}
+                            viewerAddress={activeAddress}
+                            isSelf={p.authorAddress === activeAddress}
+                            onOpenProfile={openProfile}
+                            onReply={(post) => {
+                              setView('feed')
+                              setReplyingTo(post)
+                            }}
+                            onToggleLike={handleToggleLike}
+                            likeBusy={likeBusyId === p.id}
+                          />
+                        ))
+                      )}
+                    </div>
+                  </>
                 )}
               </div>
             ) : (
-              <div className="feed">
-                {posts.length === 0 ? (
-                  <EmptyState text="Пока пусто. Напиши пост и заполни ленту." />
-                ) : (
-                  <div>
-                    {view === 'explore' && (
-                      <div className="side" style={{ padding: 0, marginBottom: 8 }}>
-                        <h3 style={{ margin: 0, padding: 12 }}>Рекомендуемые</h3>
-                        <div className="mini">
-                          <div className="mono muted" style={{ marginBottom: 8 }}>
-                            Самые активные аккаунты (за 7 дней)
-                          </div>
-                          <div style={{ display: 'grid', gap: 8 }}>
-                            {recommended.map((t) => (
-                              <div key={t.handle} style={{ display: 'flex', justifyContent: 'space-between' }}>
-                                <b>@{t.handle}</b>
-                                <span className="muted mono">{t.count}</span>
-                              </div>
-                            ))}
-                            {recommended.length === 0 && <div className="muted">Пока нет данных.</div>}
-                          </div>
+              <>
+                <div className="feed-tabs">
+                  <button
+                    type="button"
+                    className={`feed-tab ${feedMode === 'home' ? 'active' : ''}`}
+                    onClick={() => setFeedMode('home')}
+                  >
+                    Для вас
+                  </button>
+                  <button
+                    type="button"
+                    className={`feed-tab ${feedMode === 'explore' ? 'active' : ''}`}
+                    onClick={() => setFeedMode('explore')}
+                  >
+                    Все посты
+                  </button>
+                </div>
+
+                <div className="composer">
+                  <div className="row">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <div
+                        className="avatar"
+                        style={{
+                          background: `linear-gradient(135deg, ${activeAccount!.avatarColor}, rgba(255,255,255,0.08))`,
+                        }}
+                      >
+                        @{activeAccount!.handle.slice(0, 1)}
+                      </div>
+                      <div>
+                        <div style={{ fontWeight: 900 }}>{activeAccount!.displayName}</div>
+                        <div className="muted mono" style={{ fontSize: 13 }}>
+                          @{activeAccount!.handle}
                         </div>
                       </div>
-                    )}
-                    {posts.map((p) => (
-                      <PostCard
-                        key={p.id}
-                        post={p}
-                        accent={getAccent(p.authorHandle)}
-                        timeLabel={nowTimeLabel(p.createdAt)}
-                      />
-                    ))}
+                    </div>
+                    <button className="btn" onClick={() => void loadFeed()} type="button" disabled={feedLoading}>
+                      {feedLoading ? '…' : 'Обновить'}
+                    </button>
                   </div>
-                )}
-              </div>
+                  {replyingTo && (
+                    <div className="reply-banner">
+                      <span>
+                        Ответ для <b>@{replyingTo.authorHandle}</b>
+                      </span>
+                      <button type="button" onClick={() => setReplyingTo(null)} aria-label="Отменить ответ">
+                        ✕
+                      </button>
+                    </div>
+                  )}
+                  <Composer onSubmit={handleCreatePost} />
+                </div>
+
+                <div className="feed">
+                  {feedLoading && posts.length === 0 ? (
+                    <div className="feed-loading">Загрузка ленты…</div>
+                  ) : posts.length === 0 ? (
+                    <EmptyState
+                      text={
+                        feedMode === 'home'
+                          ? 'Лента пуста. Подпишитесь на людей во «Все посты» или напишите первый пост.'
+                          : 'Пока никто ничего не написал. Создайте первый пост выше.'
+                      }
+                    />
+                  ) : (
+                    <>
+                      {posts.map((p) => (
+                        <PostCard
+                          key={p.id}
+                          post={p}
+                          accent={getAccent(p.authorHandle)}
+                          timeLabel={nowTimeLabel(p.createdAt)}
+                          viewerAddress={activeAddress}
+                          isSelf={p.authorAddress === activeAddress}
+                          onOpenProfile={openProfile}
+                          onReply={(post) => setReplyingTo(post)}
+                          onToggleLike={handleToggleLike}
+                          likeBusy={likeBusyId === p.id}
+                        />
+                      ))}
+                      {nextCursor && (
+                        <div className="load-more-wrap">
+                          <button
+                            type="button"
+                            className="btn ghost"
+                            onClick={() => void loadMore()}
+                            disabled={feedLoadingMore}
+                          >
+                            {feedLoadingMore ? 'Загрузка…' : 'Загрузить ещё'}
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </>
             )}
           </main>
 
           <aside className="panel side">
-            <h3>Сейчас в тренде</h3>
+            <h3>В тренде</h3>
             <div className="mini">
               {recommended.length === 0 ? (
-                <div className="muted">Нет постов, чтобы посчитать тренды.</div>
+                <div className="muted">Мало активности за неделю — напишите пост.</div>
               ) : (
                 <div style={{ display: 'grid', gap: 10 }}>
-                  {recommended.slice(0, 5).map((t) => (
-                    <div key={t.handle} style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <b>@{t.handle}</b>
-                      <span className="muted mono">{t.count}</span>
+                  {recommended.map((t) => (
+                    <div key={t.handle} className="recommended-row">
+                      <button
+                        type="button"
+                        onClick={() => openProfile(t.handle, '')}
+                        style={{
+                          border: 'none',
+                          background: 'transparent',
+                          color: 'inherit',
+                          cursor: 'pointer',
+                          font: 'inherit',
+                          fontWeight: 800,
+                          textAlign: 'left',
+                          padding: 0,
+                        }}
+                      >
+                        @{t.handle}
+                      </button>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span className="muted mono">{t.count}</span>
+                        {normalizeHandle(t.handle) !== normalizeHandle(activeAccount!.handle) && (
+                          <button
+                            type="button"
+                            className="btn mini"
+                            onClick={() => void followFromRecommended(t.handle)}
+                          >
+                            +
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -467,12 +907,9 @@ function InnerApp() {
             </div>
             <div className="mini">
               <div className="muted" style={{ lineHeight: 1.5 }}>
-                MVP теперь читает аккаунты/посты с backend (JSON storage).
-                Дальше добавим сеть/контент-слой/децентрализацию + TON DNS.
+                Лента и профили на сервере Degram (SQLite). Для тысяч пользователей планируется PostgreSQL и горизонтальное
+                масштабирование API.
               </div>
-            </div>
-            <div className="mini mono muted">
-              UX идея: регистрация через TON Connect, без транзакции на каждое действие.
             </div>
           </aside>
         </div>
@@ -481,13 +918,43 @@ function InnerApp() {
   )
 }
 
+function ProfileStats({ address }: { address: string }) {
+  const [stats, setStats] = useState<AccountStats | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const s = await getAccountStats(address)
+        if (!cancelled) setStats(s)
+      } catch {
+        if (!cancelled) setStats(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [address])
+
+  if (!stats) return <div className="muted" style={{ marginTop: 8 }}>…</div>
+  return (
+    <div className="profile-stats">
+      <span>
+        <b>{stats.postsCount}</b> постов
+      </span>
+      <span>
+        <b>{stats.followingCount}</b> подписок
+      </span>
+      <span>
+        <b>{stats.followersCount}</b> подписчиков
+      </span>
+    </div>
+  )
+}
+
 function EmptyState({ text }: { text: string }) {
   return (
     <div style={{ padding: 16 }}>
       <div style={{ fontWeight: 950, fontSize: 16 }}>{text}</div>
-      <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
-        Это демо. Когда подключим сеть и ончейн-часть, сюда добавим feed-агрегацию и верификацию.
-      </div>
     </div>
   )
 }
@@ -500,7 +967,7 @@ function Composer({ onSubmit }: { onSubmit: (content: string) => void }) {
       <textarea
         value={content}
         onChange={(e) => setContent(e.target.value)}
-        placeholder="Что нового? Пиши как в X/Twitter…"
+        placeholder="Что нового?"
       />
       <div className="row">
         <div className="muted mono" style={{ fontSize: 12 }}>
@@ -522,29 +989,6 @@ function Composer({ onSubmit }: { onSubmit: (content: string) => void }) {
   )
 }
 
-function PostCard({ post, accent, timeLabel }: { post: Post; accent: string; timeLabel: string }) {
-  const initials = post.authorHandle.slice(0, 1).toUpperCase()
-  return (
-    <div className="card">
-      <div className="post-head">
-        <div className="post-author">
-          <div className="avatar" style={{ background: accent }}>
-            {initials}
-          </div>
-          <div style={{ minWidth: 0 }}>
-            <b>@{post.authorHandle}</b>
-            <div>
-              <span className="mono">{post.authorAddress.slice(0, 4)}…</span>
-            </div>
-          </div>
-        </div>
-        <div className="post-time">{timeLabel}</div>
-      </div>
-      <div className="post-content">{post.content}</div>
-    </div>
-  )
-}
-
 export default function App() {
   return (
     <TonConnectUIProvider manifestUrl={`${window.location.origin}/tonconnect-manifest.json`}>
@@ -552,4 +996,3 @@ export default function App() {
     </TonConnectUIProvider>
   )
 }
-

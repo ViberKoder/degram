@@ -15,12 +15,29 @@ export type LocalWallet = {
   createdAt: number
 }
 
+export type PostReplyPreview = {
+  id: string
+  authorHandle: string
+  contentPreview: string
+}
+
 export type Post = {
   id: string
   authorAddress: string
   authorHandle: string
   content: string
+  replyToPostId?: string | null
+  replyTo?: PostReplyPreview | null
   createdAt: number
+  likesCount?: number
+  repliesCount?: number
+  likedByViewer?: boolean
+}
+
+export type AccountStats = {
+  followersCount: number
+  followingCount: number
+  postsCount: number
 }
 
 const ACCOUNTS_KEY = 'degram:accounts'
@@ -90,5 +107,48 @@ export function hashToHsl(seed: string): string {
   let h = 0
   for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 360
   return `hsl(${h} 85% 55%)`
+}
+
+export type JettonHolding = {
+  master: string
+  walletAddress: string
+  balance: string
+  amount: string | null
+  symbol?: string
+  name?: string
+  image?: string
+}
+
+export type NftHolding = {
+  itemAddress: string
+  collectionAddress: string | null
+  ownerAddress: string | null
+  init: boolean
+  onSale: boolean
+  collectionName?: string
+  image?: string
+}
+
+export type DnsDomain = {
+  domain: string
+}
+
+export type WalletHoldings = {
+  address: string
+  fetchedAt: number
+  ton: {
+    balanceNano: string
+    balanceTon: string
+    balanceUsd: number | null
+    tonPriceUsd: number | null
+  }
+  jettons: JettonHolding[]
+  nfts: NftHolding[]
+  dns: DnsDomain[]
+  totalUsd: number | null
+  pricing: {
+    tonUsdSource: string
+    jettonsUsdSource: string | null
+  }
 }
 

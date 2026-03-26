@@ -1,0 +1,10 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "frontend/dist",
+  "installCommand": "npm install && npm install --prefix frontend",
+  "functions": {
+    "api/[...path].js": {
+      "includeFiles": "backend/**"
+    }
+  }
+}
