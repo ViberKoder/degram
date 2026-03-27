@@ -1,7 +1,7 @@
 // Minimal browser polyfill for Node.js Buffer (needed by @ton/ton).
 // We implement only the methods used by @ton/core/@ton/ton in this project.
 
-type BufferEncoding = 'hex' | 'base64' | 'utf8' | 'utf-8' | 'latin1' | 'binary'
+type BufferEncoding = 'hex' | 'base64' | 'base64url' | 'utf8' | 'utf-8' | 'latin1' | 'binary'
 
 function bytesToHex(bytes: Uint8Array): string {
   let out = ''
@@ -15,11 +15,21 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(bin)
 }
 
+function bytesToBase64Url(bytes: Uint8Array): string {
+  return bytesToBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+}
+
 function decodeBase64(b64: string): Uint8Array {
   const bin = atob(b64)
   const bytes = new Uint8Array(bin.length)
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
   return bytes
+}
+
+function decodeBase64Url(b64url: string): Uint8Array {
+  const normalized = b64url.replace(/-/g, '+').replace(/_/g, '/')
+  const pad = normalized.length % 4 === 0 ? '' : '='.repeat(4 - (normalized.length % 4))
+  return decodeBase64(`${normalized}${pad}`)
 }
 
 function decodeHex(hex: string): Uint8Array {
@@ -50,6 +60,7 @@ class BufferPolyfill extends Uint8Array {
     if (typeof value === 'string') {
       if (encoding === 'hex') return new BufferPolyfill(decodeHex(value))
       if (encoding === 'base64') return new BufferPolyfill(decodeBase64(value))
+      if (encoding === 'base64url') return new BufferPolyfill(decodeBase64Url(value))
       // Default UTF-8-ish: treat as binary string.
       const bytes = new TextEncoder().encode(value)
       return new BufferPolyfill(bytes)
@@ -117,6 +128,7 @@ class BufferPolyfill extends Uint8Array {
   toString(encoding?: BufferEncoding): string {
     if (encoding === 'hex') return bytesToHex(this)
     if (encoding === 'base64') return bytesToBase64(this)
+    if (encoding === 'base64url') return bytesToBase64Url(this)
     if (encoding === 'latin1' || encoding === 'binary') {
       let out = ''
       for (let i = 0; i < this.length; i++) out += String.fromCharCode(this[i])
