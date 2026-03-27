@@ -1,12 +1,18 @@
 // Minimal browser polyfill for Node.js Buffer (needed by @ton/ton).
 // We implement only the methods used by @ton/core/@ton/ton in this project.
 
-type BufferEncoding = 'hex' | 'base64'
+type BufferEncoding = 'hex' | 'base64' | 'utf8' | 'utf-8' | 'latin1' | 'binary'
 
 function bytesToHex(bytes: Uint8Array): string {
   let out = ''
   for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, '0')
   return out
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = ''
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+  return btoa(bin)
 }
 
 function decodeBase64(b64: string): Uint8Array {
@@ -110,11 +116,27 @@ class BufferPolyfill extends Uint8Array {
 
   toString(encoding?: BufferEncoding): string {
     if (encoding === 'hex') return bytesToHex(this)
-    // Default: ISO-8859-1-ish binary string
-    let out = ''
-    for (let i = 0; i < this.length; i++) out += String.fromCharCode(this[i])
-    return out
+    if (encoding === 'base64') return bytesToBase64(this)
+    if (encoding === 'latin1' || encoding === 'binary') {
+      let out = ''
+      for (let i = 0; i < this.length; i++) out += String.fromCharCode(this[i])
+      return out
+    }
+    // Node default is UTF-8
+    const decoder = new TextDecoder('utf-8')
+    return decoder.decode(this)
   }
+}
+
+// Keep legacy helper behavior for callers that rely on binary output.
+function bytesToBinaryString(bytes: Uint8Array): string {
+    let out = ''
+    for (let i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes[i])
+    return out
+}
+
+;(BufferPolyfill.prototype as any).toBinaryString = function () {
+  return bytesToBinaryString(this as Uint8Array)
 }
 
 declare global {
