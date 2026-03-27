@@ -7,9 +7,6 @@ export type LocalWallet = {
   address: string
   workchain: number
   kind: WalletKind
-  // Fast MVP mode: seed is stored unencrypted in browser localStorage.
-  // (Passwordless UX as requested.)
-  seedPhrase: string
   createdAt: number
 }
 
@@ -40,15 +37,12 @@ export async function createLocalWalletFromMnemonic(params: {
   kind?: WalletKind
 }): Promise<LocalWallet> {
   const { mnemonic, workchain = 0, kind = 'v4r2' } = params
-
-  const seedPhrase = mnemonic.join(' ')
   const { address } = await deriveWalletAddressFromMnemonic({ mnemonic, workchain })
 
   return {
     address,
     workchain,
     kind,
-    seedPhrase,
     createdAt: Date.now(),
   }
 }
