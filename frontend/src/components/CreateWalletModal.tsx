@@ -1,10 +1,13 @@
 import { useState } from 'react'
 import { createLocalWalletFromMnemonic, generateMnemonic } from '../wallet/localWalletService'
 import { saveLocalWallet } from '../utils/storage'
+import RevealSeedModal from './RevealSeedModal'
 
 export default function CreateWalletModal(props: { onClose: () => void; onCreated: (address: string) => void }) {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [seedPhrase, setSeedPhrase] = useState<string | null>(null)
+  const [createdAddress, setCreatedAddress] = useState<string | null>(null)
 
   const close = () => {
     props.onClose()
@@ -22,13 +25,31 @@ export default function CreateWalletModal(props: { onClose: () => void; onCreate
         kind: 'v4r2',
       })
       saveLocalWallet(localWallet)
-      props.onCreated(localWallet.address)
-      close()
+      setCreatedAddress(localWallet.address)
+      // Show seed phrase exactly once and do not persist it anywhere.
+      setSeedPhrase(words.join(' '))
     } catch (e) {
       setError((e as Error).message || 'Не удалось создать кошелёк.')
     } finally {
       setLoading(false)
     }
+  }
+
+  const finishSeed = () => {
+    if (createdAddress) props.onCreated(createdAddress)
+    setSeedPhrase(null)
+    setCreatedAddress(null)
+    close()
+  }
+
+  if (seedPhrase && createdAddress) {
+    return (
+      <RevealSeedModal
+        title="Recovery phrase (seed)"
+        seedPhrase={seedPhrase}
+        onClose={finishSeed}
+      />
+    )
   }
 
   return (
@@ -43,7 +64,7 @@ export default function CreateWalletModal(props: { onClose: () => void; onCreate
         <div className="modalBody">
           <div style={{ display: 'grid', gap: 12 }}>
             <div className="small">
-              Fast mode: seed хранится локально в браузере без пароля.
+              Мы покажем seed phrase один раз. Сохрани ее офлайн: без нее кошелек невозможно восстановить.
             </div>
             {error && <div className="error">{error}</div>}
             <div className="row">

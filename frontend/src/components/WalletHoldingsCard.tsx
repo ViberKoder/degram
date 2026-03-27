@@ -9,6 +9,17 @@ function formatUsd(value: number | null) {
   return `$${value.toFixed(4)}`
 }
 
+function formatErrorMessage(error: string | null) {
+  if (!error) return 'Портфель временно недоступен.'
+  if (error.includes('address_required')) return 'Нужен валидный адрес кошелька.'
+  if (error.includes('holdings_failed')) return 'Не удалось получить данные сети TON.'
+  if (error.includes('invalid_json_response')) return 'Сервер вернул некорректный ответ.'
+  if (error.includes('Unexpected token') || error.includes('JSON.parse')) {
+    return 'Сервер вернул не-JSON ответ. Попробуйте повторить чуть позже.'
+  }
+  return 'Не удалось загрузить портфель. Попробуйте обновить страницу.'
+}
+
 export default function WalletHoldingsCard({ address }: { address: string }) {
   const [loading, setLoading] = useState(false)
   const [holdings, setHoldings] = useState<WalletHoldings | null>(null)
@@ -49,50 +60,53 @@ export default function WalletHoldingsCard({ address }: { address: string }) {
     return holdings?.dns?.slice(0, 8) ?? []
   }, [holdings])
 
+  const hasData = Boolean(holdings)
+  const showEmptyState = !loading && !error && !hasData
+
   if (!address) return null
 
   return (
-    <div className="mini" style={{ marginTop: 12 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline' }}>
-        <div>
+    <section className="portfolio-card">
+      <div className="portfolio-head">
+        <div className="portfolio-title">
           <b>Portfolio</b>
-          <div className="muted mono" style={{ marginTop: 6, fontSize: 12 }}>
-            {formatUsd(holdings?.totalUsd ?? null)} total
-          </div>
+          <span className="portfolio-total">{formatUsd(holdings?.totalUsd ?? null)} total</span>
         </div>
-        <div className="muted mono" style={{ fontSize: 12, textAlign: 'right' }}>
-          TON: {formatUsd(holdings?.ton?.balanceUsd ?? null)}
-        </div>
+        <div className="portfolio-ton">TON: {formatUsd(holdings?.ton?.balanceUsd ?? null)}</div>
       </div>
 
-      {loading && <div className="muted" style={{ marginTop: 12 }}>Загрузка владений…</div>}
-      {error && <div className="error" style={{ marginTop: 12 }}>{error}</div>}
+      {loading && <div className="portfolio-message muted">Загружаем активы TON…</div>}
+
+      {error && (
+        <div className="portfolio-message error">
+          {formatErrorMessage(error)}
+          <div className="portfolio-submessage">Профиль и посты продолжают работать даже без этого блока.</div>
+        </div>
+      )}
+
+      {showEmptyState && <div className="portfolio-message muted">Пока нет данных для отображения.</div>}
 
       {!loading && !error && holdings && (
-        <div style={{ marginTop: 12, display: 'grid', gap: 14 }}>
-          <div>
-            <div className="muted mono" style={{ marginBottom: 8, fontSize: 12 }}>
-              Jettons
-            </div>
+        <div className="portfolio-grid">
+          <div className="portfolio-section">
+            <div className="portfolio-label">Jettons</div>
             {topJettons.length === 0 ? (
-              <div className="muted">Нет jettons.</div>
+              <div className="muted">Нет jettons</div>
             ) : (
-              <div style={{ display: 'grid', gap: 8 }}>
+              <div className="portfolio-list">
                 {topJettons.map((j) => (
-                  <div key={j.master} style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-                    <div style={{ minWidth: 0 }}>
-                      <b style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {j.symbol ?? 'JETTON'}
-                      </b>
-                      <div className="muted mono" style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  <div key={j.master} className="portfolio-list-item">
+                    <div className="portfolio-asset-meta">
+                      <b className="portfolio-asset-title">{j.symbol ?? 'JETTON'}</b>
+                      <div className="muted mono portfolio-asset-value">
                         {j.amount ?? j.balance}
                       </div>
                     </div>
-                    <div style={{ width: 42, height: 42, borderRadius: 12, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)' }}>
+                    <div className="portfolio-asset-thumb">
                       {j.image ? (
                         <img src={j.image} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                       ) : (
-                        <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.55)', fontWeight: 900 }}>
+                        <div className="portfolio-asset-fallback">
                           {j.symbol ? j.symbol.slice(0, 1).toUpperCase() : 'J'}
                         </div>
                       )}
@@ -103,26 +117,24 @@ export default function WalletHoldingsCard({ address }: { address: string }) {
             )}
           </div>
 
-          <div>
-            <div className="muted mono" style={{ marginBottom: 8, fontSize: 12 }}>
-              NFTs
-            </div>
+          <div className="portfolio-section">
+            <div className="portfolio-label">NFTs</div>
             {topNfts.length === 0 ? (
-              <div className="muted">Нет NFT.</div>
+              <div className="muted">Нет NFT</div>
             ) : (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
+              <div className="portfolio-nft-grid">
                 {topNfts.map((n) => (
-                  <div key={n.itemAddress} style={{ border: '1px solid rgba(255,255,255,0.08)', borderRadius: 12, padding: 8, background: 'rgba(255,255,255,0.03)' }}>
-                    <div style={{ width: '100%', aspectRatio: '1 / 1', borderRadius: 10, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.02)' }}>
+                  <div key={n.itemAddress} className="portfolio-nft-item">
+                    <div className="portfolio-nft-thumb">
                       {n.image ? (
                         <img src={n.image} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                       ) : (
-                        <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.55)', fontWeight: 900 }}>
+                        <div className="portfolio-asset-fallback">
                           NFT
                         </div>
                       )}
                     </div>
-                    <div style={{ marginTop: 8, fontSize: 12, fontWeight: 900, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <div className="portfolio-nft-title">
                       {n.collectionName ?? 'Collection'}
                     </div>
                   </div>
@@ -131,16 +143,14 @@ export default function WalletHoldingsCard({ address }: { address: string }) {
             )}
           </div>
 
-          <div>
-            <div className="muted mono" style={{ marginBottom: 8, fontSize: 12 }}>
-              DNS domains
-            </div>
+          <div className="portfolio-section">
+            <div className="portfolio-label">DNS Domains</div>
             {topDns.length === 0 ? (
-              <div className="muted">Нет доменов.</div>
+              <div className="muted">Нет доменов</div>
             ) : (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              <div className="portfolio-tags">
                 {topDns.map((d) => (
-                  <span key={d.domain} className="mono muted" style={{ fontSize: 12, padding: '6px 10px', borderRadius: 999, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.03)' }}>
+                  <span key={d.domain} className="portfolio-tag mono">
                     {d.domain}
                   </span>
                 ))}
@@ -149,7 +159,7 @@ export default function WalletHoldingsCard({ address }: { address: string }) {
           </div>
         </div>
       )}
-    </div>
+    </section>
   )
 }
 

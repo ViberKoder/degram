@@ -31,7 +31,7 @@ export default function RevealSeedModal(props: {
         <div className="modalBody">
           <div style={{ display: 'grid', gap: 12 }}>
             <div className="small">
-              Seed хранится локально в этом браузере (fast MVP mode, без пароля).
+              Seed phrase показывается один раз и не хранится у нас. Не отправляй ее никому, включая поддержку.
             </div>
             <div className="seedGrid mono">
               {words.map((w, i) => (

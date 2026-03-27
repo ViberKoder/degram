@@ -488,14 +488,14 @@ function InnerApp() {
   if (!activeAddress) {
     return (
       <div className="container">
-        <div style={{ paddingTop: 48, paddingBottom: 24, display: 'grid', gap: 18 }}>
-          <div className="panel" style={{ padding: 18 }}>
+        <div style={{ paddingTop: 52, paddingBottom: 24, display: 'grid', gap: 18 }}>
+          <div className="panel" style={{ padding: 20 }}>
             <div className="auth-title">Добро пожаловать в Degram</div>
             <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
-              Подключи TON-кошелёк через <span className="mono">TON Connect</span> или создай кошелёк прямо здесь —
-              аккаунт и лента хранятся на сервере Degram.
+              TON/Telegram social layer: подключи кошелёк через <span className="mono">TON Connect</span> или создай
+              self-custody wallet, чтобы сразу войти в ленту.
             </div>
-            <div style={{ marginTop: 18, display: 'grid', gap: 12 }}>
+            <div style={{ marginTop: 20, display: 'grid', gap: 12 }}>
               <div style={{ display: 'flex', justifyContent: 'center' }}>
                 <TonConnectButton />
               </div>
@@ -523,7 +523,7 @@ function InnerApp() {
     return (
       <div className="container">
         <div style={{ paddingTop: 48, paddingBottom: 24 }}>
-          <div className="panel" style={{ padding: 18 }}>
+          <div className="panel" style={{ padding: 20 }}>
             <div className="auth-title">Загрузка…</div>
             <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
               Подключаемся к API и проверяем аккаунт.
@@ -537,7 +537,7 @@ function InnerApp() {
   if (activeAddress && accountLoaded && !activeAccount) {
     return (
       <div className="container">
-        <div className="panel" style={{ marginTop: 16, padding: 18 }}>
+        <div className="panel" style={{ marginTop: 20, padding: 20 }}>
           <div className="auth-title">Создаём аккаунт…</div>
           <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
             Мы автоматически сгенерируем @handle на базе адреса кошелька и сразу покажем витрину ваших NFT, jettons и DNS.
@@ -907,8 +907,7 @@ function InnerApp() {
             </div>
             <div className="mini">
               <div className="muted" style={{ lineHeight: 1.5 }}>
-                Лента и профили на сервере Degram (SQLite). Для тысяч пользователей планируется PostgreSQL и горизонтальное
-                масштабирование API.
+                Данные хранятся в PostgreSQL. Архитектура ориентирована на serverless runtime и масштабирование API.
               </div>
             </div>
           </aside>

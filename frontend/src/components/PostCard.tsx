@@ -43,7 +43,7 @@ export default function PostCard({
           <div style={{ minWidth: 0, textAlign: 'left' }}>
             <b>@{post.authorHandle}</b>
             <div>
-              <span className="mono">{post.authorAddress.slice(0, 4)}…</span>
+              <span className="mono">{post.authorAddress.slice(0, 6)}…{post.authorAddress.slice(-4)}</span>
             </div>
           </div>
         </button>
@@ -70,13 +70,15 @@ export default function PostCard({
           <span className="post-action-icon" aria-hidden>
             {liked ? '♥' : '♡'}
           </span>
-          <span>{likes}</span>
+          <span>Like</span>
+          <span className="mono">{likes}</span>
         </button>
         <button type="button" className="post-action" onClick={() => onReply(post)} title="Ответить">
           <span className="post-action-icon" aria-hidden>
             ↩
           </span>
-          <span>{replies}</span>
+          <span>Reply</span>
+          <span className="mono">{replies}</span>
         </button>
         {isSelf && <span className="post-action muted-inline">Ваш пост</span>}
       </div>

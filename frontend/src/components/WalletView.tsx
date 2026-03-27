@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react'
 import type { LocalWallet } from '../utils/storage'
-import RevealSeedModal from './RevealSeedModal'
 
 export default function WalletView(props: {
   activeAddress: string
@@ -9,7 +8,6 @@ export default function WalletView(props: {
   onDisconnectTon: () => void
   onClearLocalWallet: () => void
 }) {
-  const [showSeed, setShowSeed] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
 
   const isLocal = props.localWallet != null && props.localWallet.address === props.activeAddress
@@ -24,7 +22,7 @@ export default function WalletView(props: {
 
   return (
     <div className="feed" style={{ padding: 12 }}>
-      <div className="row" style={{ alignItems: 'flex-start' }}>
+      <div className="row" style={{ alignItems: 'flex-start', marginBottom: 12 }}>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
           <div className="avatar" style={{ background: `linear-gradient(135deg, ${accent}, rgba(255,255,255,0.08))` }}>
             W
@@ -46,11 +44,9 @@ export default function WalletView(props: {
         )}
       </div>
 
-      <div style={{ height: 12 }} />
-
       {!isLocal ? (
         <div className="mini">
-          <div style={{ fontWeight: 900, marginBottom: 6 }}>Seed недоступен</div>
+          <div style={{ fontWeight: 900, marginBottom: 6 }}>External wallet mode</div>
           <div className="small muted">
             Этот кошелёк подключен извне через TON Connect. Для seed-фразы нужен локальный self-custody кошелёк.
           </div>
@@ -60,22 +56,14 @@ export default function WalletView(props: {
           <div className="mini">
             <div style={{ fontWeight: 900, marginBottom: 6 }}>Recovery phrase</div>
             <div className="small muted" style={{ marginBottom: 10 }}>
-              Fast mode: seed хранится локально в этом браузере без пароля (unencrypted).
+              Seed отображается только при создании. Для безопасности мы не храним ее на сервере и в localStorage.
             </div>
-            <button
-              className="btn primary"
-              onClick={() => setShowSeed(true)}
-              type="button"
-              disabled={props.localWallet?.seedPhrase == null}
-            >
-              Показать seed
-            </button>
           </div>
 
           <div className="mini">
             <div style={{ fontWeight: 900, marginBottom: 6 }}>Опасные действия</div>
             <div className="small muted" style={{ marginBottom: 10 }}>
-              Сброс удалит локальный seed из браузера. История постов, привязанных к этому адресу, останется в MVP-локальном хранилище.
+              Сброс удалит локальный кошелёк (адрес) из браузера. Сид (seed) в приложении не хранится, поэтому восстановить его после сброса будет нельзя. История постов, привязанных к этому адресу, останется в MVP-локальном хранилище.
             </div>
             {!confirmClear ? (
               <button className="btn danger" onClick={() => setConfirmClear(true)} type="button">
@@ -93,14 +81,6 @@ export default function WalletView(props: {
             )}
           </div>
         </div>
-      )}
-
-      {showSeed && props.localWallet && (
-        <RevealSeedModal
-          title="Recovery phrase (seed)"
-          seedPhrase={props.localWallet.seedPhrase ?? ''}
-          onClose={() => setShowSeed(false)}
-        />
       )}
     </div>
   )

@@ -11,6 +11,23 @@ function apiUrl(path: string): string {
   return o ? `${o}${path}` : path
 }
 
+function safeParseJson(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+function toErrorMessage(status: number, statusText: string, payload: any, rawText: string): string {
+  if (payload?.error && typeof payload.error === 'string') return payload.error
+  if (payload?.details && typeof payload.details === 'string') return payload.details
+  if (status === 500) return 'server_error'
+  if (status === 404) return 'not_found'
+  if (rawText) return rawText.slice(0, 180)
+  return statusText || 'Request failed'
+}
+
 async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(apiUrl(path), {
     ...options,
@@ -21,13 +38,21 @@ async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
   })
 
   const text = await res.text()
-  const json = text ? JSON.parse(text) : null
+  const json = text ? safeParseJson(text) : null
 
   if (!res.ok) {
-    const message = json?.error ?? res.statusText
-    const err = new Error(typeof message === 'string' ? message : 'Request failed')
+    const message = toErrorMessage(res.status, res.statusText, json, text)
+    const err = new Error(message)
     ;(err as any).status = res.status
     ;(err as any).payload = json
+    ;(err as any).raw = text
+    throw err
+  }
+
+  if (json == null) {
+    const err = new Error('invalid_json_response')
+    ;(err as any).status = res.status
+    ;(err as any).raw = text
     throw err
   }
 
