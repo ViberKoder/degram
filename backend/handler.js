@@ -135,8 +135,9 @@ async function withTimeout(fn, ms) {
 }
 
 async function toncenterGet(pathname, params) {
-  const url = new URL(TONCENTER_API_BASE)
-  url.pathname = pathname.startsWith('/') ? pathname : `/${pathname}`
+  const base = TONCENTER_API_BASE.endsWith('/') ? TONCENTER_API_BASE : `${TONCENTER_API_BASE}/`
+  const clean = pathname.startsWith('/') ? pathname.slice(1) : pathname
+  const url = new URL(clean, base)
   if (params) {
     for (const [k, v] of Object.entries(params)) {
       if (v == null) continue
@@ -152,6 +153,34 @@ async function toncenterGet(pathname, params) {
     throw new Error(`toncenter_${res.status}: ${text.slice(0, 300)}`)
   }
   return res.json()
+}
+
+function sanitizeNanoBalance(value) {
+  const raw = String(value ?? '0').trim()
+  return /^[0-9]+$/.test(raw) ? raw : '0'
+}
+
+function emptyHoldings(address, details = null) {
+  return {
+    address,
+    fetchedAt: nowMs(),
+    ton: {
+      balanceNano: '0',
+      balanceTon: '0.000000',
+      balanceUsd: null,
+      tonPriceUsd: null,
+    },
+    jettons: [],
+    nfts: [],
+    dns: [],
+    totalUsd: null,
+    pricing: {
+      tonUsdSource: 'CoinGecko',
+      jettonsUsdSource: DYOR_API_KEY ? 'DYOR' : null,
+    },
+    partial: true,
+    error: details ?? 'holdings_unavailable',
+  }
 }
 
 async function getTonPriceUsd() {
@@ -189,13 +218,13 @@ async function getWalletHoldings(address) {
       },
       TONCENTER_TIMEOUT_MS,
     )
-    tonBalanceNano = json?.wallets?.[0]?.balance ?? '0'
+    tonBalanceNano = sanitizeNanoBalance(json?.wallets?.[0]?.balance ?? '0')
   } catch {
     // partial
   }
 
   tonPriceUsd = await getTonPriceUsd()
-  const { tonStr, tonApprox } = parseNanoToTonParts(tonBalanceNano)
+  const { tonStr, tonApprox } = parseNanoToTonParts(sanitizeNanoBalance(tonBalanceNano))
   tonUsd = tonPriceUsd == null || !Number.isFinite(tonPriceUsd) ? null : tonApprox * tonPriceUsd
 
   // Jettons
@@ -565,7 +594,7 @@ export async function handleRequest(req, res) {
         return jsonResponse(res, 200, holdings)
       } catch (e) {
         const message = e && typeof e === 'object' && 'message' in e ? e.message : String(e)
-        return jsonResponse(res, 500, { error: 'holdings_failed', details: message })
+        return jsonResponse(res, 200, emptyHoldings(address, message))
       }
     }
 

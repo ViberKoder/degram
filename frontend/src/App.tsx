@@ -572,22 +572,15 @@ function InnerApp() {
               <small className="mono">TON social</small>
             </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <div style={{ textAlign: 'right' }}>
+          <div className="topbar-account">
+            <div className="topbar-account-meta">
               <button
                 type="button"
                 onClick={() => {
                   setView('profile')
                   setViewingUserHandle(null)
                 }}
-                style={{
-                  border: 'none',
-                  background: 'transparent',
-                  padding: 0,
-                  cursor: 'pointer',
-                  color: 'inherit',
-                  font: 'inherit',
-                }}
+                className="topbar-account-handle"
               >
                 <div style={{ fontWeight: 850, lineHeight: 1.1 }}>@{activeAccount!.handle}</div>
               </button>
