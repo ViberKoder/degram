@@ -31,6 +31,7 @@ API: `http://localhost:3002` (порт `PORT`).
 | `SUPABASE_DB_URL` | Legacy alias для совместимости |
 | `SUPABASE_DATABASE_URL` | Legacy alias для совместимости |
 | `DATABASE_URL` | Опциональный fallback для старой конфигурации |
+| `PG_SSL_REJECT_UNAUTHORIZED` | По умолчанию `false` для managed Postgres в serverless; включай `true`, только если chain полностью доверенная |
 | `AUTH_SECRET` | Секрет для сессионных токенов |
 | `CORS_ORIGIN` | `*` или `https://<твой-проект>.vercel.app` |
 | `PORT` | Только локальный dev (по умолчанию 3002) |

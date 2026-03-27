@@ -7,7 +7,8 @@ let pool
 function inferSsl(connectionString) {
   if (process.env.PG_SSL === 'false') return false
   if (/localhost|127\.0\.0\.1/.test(connectionString)) return false
-  return { rejectUnauthorized: process.env.PG_SSL_REJECT_UNAUTHORIZED !== 'false' }
+  const rejectUnauthorized = process.env.PG_SSL_REJECT_UNAUTHORIZED === 'true'
+  return { rejectUnauthorized }
 }
 
 /**
