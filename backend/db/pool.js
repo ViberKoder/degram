@@ -11,6 +11,23 @@ function inferSsl(connectionString) {
   return { rejectUnauthorized }
 }
 
+function normalizeConnectionString(connectionString) {
+  // Vercel/Supabase often provide sslmode=require. With pg v8 this can still
+  // fail in serverless if chain validation is strict in runtime. Default to
+  // no-verify unless strict mode is explicitly requested.
+  if (/localhost|127\.0\.0\.1/.test(connectionString)) return connectionString
+  if (process.env.PG_SSL_REJECT_UNAUTHORIZED === 'true') return connectionString
+  try {
+    const url = new URL(connectionString)
+    if (!url.searchParams.has('sslmode') || url.searchParams.get('sslmode') === 'require') {
+      url.searchParams.set('sslmode', 'no-verify')
+    }
+    return url.toString()
+  } catch {
+    return connectionString
+  }
+}
+
 /**
  * Serverless-friendly singleton.
  * Preferred native vars:
@@ -37,7 +54,7 @@ export function getPool() {
     )
   }
   pool = new Pool({
-    connectionString,
+    connectionString: normalizeConnectionString(connectionString),
     max: Number(process.env.PG_POOL_MAX ?? 10),
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
