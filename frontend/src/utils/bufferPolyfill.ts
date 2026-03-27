@@ -72,6 +72,42 @@ class BufferPolyfill extends Uint8Array {
     return length
   }
 
+  writeUInt8(value: number, offset = 0): number {
+    this[offset] = value & 0xff
+    return offset + 1
+  }
+
+  writeUInt16LE(value: number, offset = 0): number {
+    this[offset] = value & 0xff
+    this[offset + 1] = (value >>> 8) & 0xff
+    return offset + 2
+  }
+
+  writeInt16LE(value: number, offset = 0): number {
+    const v = value & 0xffff
+    this[offset] = v & 0xff
+    this[offset + 1] = (v >>> 8) & 0xff
+    return offset + 2
+  }
+
+  writeUInt32LE(value: number, offset = 0): number {
+    const v = value >>> 0
+    this[offset] = v & 0xff
+    this[offset + 1] = (v >>> 8) & 0xff
+    this[offset + 2] = (v >>> 16) & 0xff
+    this[offset + 3] = (v >>> 24) & 0xff
+    return offset + 4
+  }
+
+  writeInt32LE(value: number, offset = 0): number {
+    const v = value | 0
+    this[offset] = v & 0xff
+    this[offset + 1] = (v >>> 8) & 0xff
+    this[offset + 2] = (v >>> 16) & 0xff
+    this[offset + 3] = (v >>> 24) & 0xff
+    return offset + 4
+  }
+
   toString(encoding?: BufferEncoding): string {
     if (encoding === 'hex') return bytesToHex(this)
     // Default: ISO-8859-1-ish binary string
