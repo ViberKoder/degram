@@ -1,4 +1,4 @@
--- PostgreSQL — основное хранилище Degram (Neon / RDS / Supabase и т.д.)
+-- PostgreSQL — основное хранилище Degram
 -- Timestamps: epoch ms (bigint) — как в API
 
 CREATE TABLE IF NOT EXISTS users (

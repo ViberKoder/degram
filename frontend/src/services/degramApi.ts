@@ -1,4 +1,23 @@
 import type { Account, AccountStats, Post } from '../utils/storage'
+import { loadSession } from '../utils/sessionAuth'
+
+function authHeaderFor(address: string): Record<string, string> {
+  const s = loadSession()
+  if (s?.address === address && s?.token) {
+    return { Authorization: `Bearer ${s.token}` }
+  }
+  return {}
+}
+
+async function requestJsonAuth<T>(path: string, address: string, options?: RequestInit): Promise<T> {
+  return requestJson<T>(path, {
+    ...options,
+    headers: {
+      ...authHeaderFor(address),
+      ...options?.headers,
+    },
+  })
+}
 
 /** Empty string = same origin (Vite dev proxy to backend). Set VITE_API_URL for production. */
 function apiOrigin(): string {
@@ -97,13 +116,33 @@ export async function getPostById(params: { id: string; viewerAddress?: string }
   return requestJson<{ post: Post }>(`/api/posts/by-id?id=${encodeURIComponent(params.id)}${v}`)
 }
 
+export async function requestAuthChallenge(address: string) {
+  return requestJson<{ challengeId: string; message: string; expiresAt: number }>('/api/auth/challenge', {
+    method: 'POST',
+    body: JSON.stringify({ address }),
+  })
+}
+
+export async function verifyAuthSession(params: {
+  address: string
+  challengeId: string
+  publicKey: string
+  tonConnect?: unknown
+  simpleSignature?: string
+}) {
+  return requestJson<{ token: string; expiresAt: number }>('/api/auth/verify', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  })
+}
+
 export async function upsertAccount(params: {
   address: string
   handle: string
   displayName: string
   avatarColor: string
 }): Promise<Account> {
-  const data = await requestJson<{ account: Account }>(`/api/accounts`, {
+  const data = await requestJsonAuth<{ account: Account }>(`/api/accounts`, params.address, {
     method: 'POST',
     body: JSON.stringify(params),
   })
@@ -182,7 +221,7 @@ export async function createPost(params: {
   content: string
   replyToPostId?: string | null
 }): Promise<Post> {
-  const data = await requestJson<{ post: Post }>(`/api/posts`, {
+  const data = await requestJsonAuth<{ post: Post }>(`/api/posts`, params.authorAddress, {
     method: 'POST',
     body: JSON.stringify(params),
   })
@@ -190,14 +229,14 @@ export async function createPost(params: {
 }
 
 export async function follow(params: { followerAddress: string; followeeAddress: string }) {
-  return requestJson<{ ok: true }>(`/api/follows`, {
+  return requestJsonAuth<{ ok: true }>(`/api/follows`, params.followerAddress, {
     method: 'POST',
     body: JSON.stringify(params),
   })
 }
 
 export async function unfollow(params: { followerAddress: string; followeeAddress: string }) {
-  return requestJson<{ ok: true }>(`/api/follows/remove`, {
+  return requestJsonAuth<{ ok: true }>(`/api/follows/remove`, params.followerAddress, {
     method: 'POST',
     body: JSON.stringify(params),
   })
@@ -215,14 +254,14 @@ export async function getFollowsByAddress(params: {
 }
 
 export async function likePost(params: { postId: string; walletAddress: string }) {
-  return requestJson<{ ok: true }>(`/api/likes`, {
+  return requestJsonAuth<{ ok: true }>(`/api/likes`, params.walletAddress, {
     method: 'POST',
     body: JSON.stringify(params),
   })
 }
 
 export async function unlikePost(params: { postId: string; walletAddress: string }) {
-  return requestJson<{ ok: true }>(`/api/likes/remove`, {
+  return requestJsonAuth<{ ok: true }>(`/api/likes/remove`, params.walletAddress, {
     method: 'POST',
     body: JSON.stringify(params),
   })

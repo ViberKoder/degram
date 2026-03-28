@@ -1,6 +1,12 @@
 import crypto from 'node:crypto'
 import { URL } from 'node:url'
 import { query } from './db/pool.js'
+import {
+  verifyTonConnectTextSignData,
+  verifySimpleDetached,
+  addressFromPublicKeyV4,
+  addressesEqual,
+} from './auth/verifySignature.js'
 
 const MAX_BODY_BYTES = 128 * 1024
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000
@@ -8,13 +14,13 @@ const CHALLENGE_TTL_MS = 5 * 60 * 1000
 const REQUESTS_PER_MINUTE = 300
 const AUTH_SECRET = process.env.AUTH_SECRET ?? 'degram-dev-secret-change-me'
 const CORS_ORIGIN = process.env.CORS_ORIGIN ?? '*'
-const MAX_FEED_ROWS = 8000
-
 // "Blockchain vitrine" (NFT / Jettons / DNS + USD valuation).
 // These calls are read-only and executed on demand.
 const TONCENTER_API_KEY = process.env.TONCENTER_API_KEY ?? ''
 const TONCENTER_API_BASE = process.env.TONCENTER_API_BASE ?? 'https://toncenter.com/api/v3'
 const TONCENTER_TIMEOUT_MS = Number(process.env.TONCENTER_TIMEOUT_MS ?? 9000)
+const TONAPI_BASE = process.env.TONAPI_BASE ?? 'https://tonapi.io/v2'
+const TONAPI_KEY = process.env.TONAPI_KEY ?? ''
 const COINGECKO_TON_PRICE_URL =
   process.env.COINGECKO_TON_PRICE_URL ??
   'https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=usd'
@@ -58,21 +64,6 @@ function decodeCursor(cursor) {
   } catch {
     return null
   }
-}
-
-function paginateByCursor(sortedItems, limit, cursor) {
-  if (!cursor) {
-    const page = sortedItems.slice(0, limit)
-    const nextCursor = page.length === limit ? encodeCursor(page[page.length - 1]) : null
-    return { page, nextCursor }
-  }
-  const c = decodeCursor(cursor)
-  if (!c) return { page: [], nextCursor: null }
-  const startIndex = sortedItems.findIndex((p) => p.createdAt === c.createdAt && p.id === c.id)
-  const from = startIndex >= 0 ? startIndex + 1 : sortedItems.length
-  const page = sortedItems.slice(from, from + limit)
-  const nextCursor = page.length === limit ? encodeCursor(page[page.length - 1]) : null
-  return { page, nextCursor }
 }
 
 function jsonResponse(res, status, body) {
@@ -155,6 +146,23 @@ async function toncenterGet(pathname, params) {
   return res.json()
 }
 
+async function tonapiGet(pathname, params) {
+  const base = TONAPI_BASE.endsWith('/') ? TONAPI_BASE : `${TONAPI_BASE}/`
+  const clean = pathname.startsWith('/') ? pathname.slice(1) : pathname
+  const url = new URL(clean, base)
+  if (params) {
+    for (const [k, v] of Object.entries(params)) {
+      if (v == null) continue
+      url.searchParams.set(k, String(v))
+    }
+  }
+  const headers = {}
+  if (TONAPI_KEY) headers.Authorization = `Bearer ${TONAPI_KEY}`
+  const res = await fetch(url.toString(), { headers })
+  if (!res.ok) throw new Error(`tonapi_${res.status}`)
+  return res.json()
+}
+
 function sanitizeNanoBalance(value) {
   const raw = String(value ?? '0').trim()
   return /^[0-9]+$/.test(raw) ? raw : '0'
@@ -206,6 +214,7 @@ async function getWalletHoldings(address) {
   let tonUsd = null
 
   // TON balance (nanoTON)
+  let usedTonCenter = false
   try {
     const json = await withTimeout(
       async (controller) => {
@@ -219,16 +228,18 @@ async function getWalletHoldings(address) {
       TONCENTER_TIMEOUT_MS,
     )
     tonBalanceNano = sanitizeNanoBalance(json?.wallets?.[0]?.balance ?? '0')
+    usedTonCenter = true
   } catch {
     // partial
   }
 
   tonPriceUsd = await getTonPriceUsd()
-  const { tonStr, tonApprox } = parseNanoToTonParts(sanitizeNanoBalance(tonBalanceNano))
+  const { tonApprox } = parseNanoToTonParts(sanitizeNanoBalance(tonBalanceNano))
   tonUsd = tonPriceUsd == null || !Number.isFinite(tonPriceUsd) ? null : tonApprox * tonPriceUsd
 
   // Jettons
   let jettons = []
+  let toncenterJettonsOk = false
   try {
     const wallets = await toncenterGet('/jetton/wallets', {
       owner_address: addr,
@@ -289,12 +300,14 @@ async function getWalletHoldings(address) {
         image: image ?? undefined,
       }
     })
+    toncenterJettonsOk = true
   } catch {
     // partial
   }
 
   // NFTs
   let nfts = []
+  let toncenterNftsOk = false
   try {
     const nftJson = await toncenterGet('/nft/items', {
       owner_address: addr,
@@ -312,12 +325,14 @@ async function getWalletHoldings(address) {
         onSale: Boolean(it.on_sale),
       }
     })
+    toncenterNftsOk = true
   } catch {
     // partial
   }
 
   // DNS domains
   let dnsDomains = []
+  let toncenterDnsOk = false
   try {
     const dnsJson = await toncenterGet('/dns/records', {
       wallet: addr,
@@ -327,8 +342,84 @@ async function getWalletHoldings(address) {
     const records = dnsJson?.records ?? []
     const domains = records.map((r) => r.domain).filter(Boolean)
     dnsDomains = [...new Set(domains)].slice(0, HOLDINGS_DNS_LIMIT).map((domain) => ({ domain }))
+    toncenterDnsOk = true
   } catch {
     // partial
+  }
+
+  // Fallback provider (TonAPI) when TonCenter is unavailable or rate-limited.
+  const needFallback = !usedTonCenter || !toncenterJettonsOk || !toncenterNftsOk
+  if (needFallback) {
+    try {
+      const accountJson = await tonapiGet(`/accounts/${encodeURIComponent(addr)}`)
+      const apiNano = sanitizeNanoBalance(accountJson?.balance ?? '0')
+      if (apiNano !== '0' || tonBalanceNano === '0') {
+        tonBalanceNano = apiNano
+        const { tonStr: t, tonApprox: a } = parseNanoToTonParts(tonBalanceNano)
+        tonUsd = tonPriceUsd == null || !Number.isFinite(tonPriceUsd) ? null : a * tonPriceUsd
+        if (t) {
+          // Refresh tonStr-like value indirectly by keeping tonBalanceNano; final response recalculates display.
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    if (!toncenterJettonsOk || jettons.length === 0) {
+      try {
+        const jettonsJson = await tonapiGet(`/accounts/${encodeURIComponent(addr)}/jettons`, {
+          currencies: 'usd',
+          limit: HOLDINGS_JETTON_LIMIT,
+        })
+        const balances = jettonsJson?.balances ?? []
+        jettons = balances.slice(0, HOLDINGS_JETTON_LIMIT).map((b) => ({
+          master: b?.jetton?.address ?? b?.jetton_address ?? '',
+          walletAddress: b?.wallet_address ?? '',
+          balance: String(b?.balance ?? '0'),
+          amount: b?.balance ?? null,
+          symbol: b?.jetton?.symbol ?? undefined,
+          name: b?.jetton?.name ?? undefined,
+          image: b?.jetton?.image ?? undefined,
+        }))
+      } catch {
+        // ignore
+      }
+    }
+
+    if (!toncenterNftsOk || nfts.length === 0) {
+      try {
+        const nftsJson = await tonapiGet(`/accounts/${encodeURIComponent(addr)}/nfts`, {
+          limit: HOLDINGS_NFT_LIMIT,
+        })
+        const items = nftsJson?.nft_items ?? nftsJson?.items ?? []
+        nfts = items.slice(0, HOLDINGS_NFT_LIMIT).map((it) => ({
+          itemAddress: it?.address ?? '',
+          collectionAddress: it?.collection?.address ?? null,
+          ownerAddress: it?.owner?.address ?? null,
+          collectionName: it?.collection?.name ?? undefined,
+          image: it?.preview?.image ?? it?.metadata?.image ?? undefined,
+          onSale: Boolean(it?.sale),
+        }))
+      } catch {
+        // ignore
+      }
+    }
+
+    if (!toncenterDnsOk && dnsDomains.length === 0) {
+      try {
+        const dnsJson = await tonapiGet(`/dns/${encodeURIComponent(addr)}`)
+        const names = []
+        if (typeof dnsJson?.name === 'string') names.push(dnsJson.name)
+        if (Array.isArray(dnsJson?.domains)) {
+          for (const d of dnsJson.domains) {
+            if (typeof d?.name === 'string') names.push(d.name)
+          }
+        }
+        dnsDomains = [...new Set(names)].slice(0, HOLDINGS_DNS_LIMIT).map((domain) => ({ domain }))
+      } catch {
+        // ignore
+      }
+    }
   }
 
   // USD valuation (best effort):
@@ -358,6 +449,7 @@ async function getWalletHoldings(address) {
   }
 
   const totalUsd = tonUsd == null ? null : tonUsd + (Number.isFinite(jettonsUsd) ? jettonsUsd : 0)
+  const { tonStr } = parseNanoToTonParts(sanitizeNanoBalance(tonBalanceNano))
 
   return {
     address: addr,
@@ -528,7 +620,10 @@ function verifySessionToken(token) {
     if (exp < nowMs()) return null
     const payload = `${address}|${exp}|${nonce}`
     const expected = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('hex')
-    if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null
+    const sigBuf = Buffer.from(sig, 'hex')
+    const expBuf = Buffer.from(expected, 'hex')
+    if (sigBuf.length !== expBuf.length) return null
+    if (!crypto.timingSafeEqual(sigBuf, expBuf)) return null
     return { address, exp, nonce }
   } catch {
     return null
@@ -545,13 +640,32 @@ function getBearerToken(req) {
 
 function requireAddressAuth(req) {
   const token = getBearerToken(req)
-  if (token) {
-    const parsed = verifySessionToken(token)
-    if (parsed) return parsed.address
+  if (!token) return null
+  const parsed = verifySessionToken(token)
+  return parsed ? parsed.address : null
+}
+
+function parsePublicKeyHex(hex) {
+  try {
+    const s = String(hex ?? '').replace(/^0x/i, '').trim()
+    if (!s) return null
+    const b = Buffer.from(s, 'hex')
+    return b.length === 32 ? b : null
+  } catch {
+    return null
   }
-  const legacyAddress = req.headers['x-degram-address']
-  if (typeof legacyAddress === 'string' && legacyAddress.trim()) return legacyAddress.trim()
-  return null
+}
+
+/**
+ * Все мутации требуют валидный Bearer session token.
+ */
+function requireBearerAuth(req, res) {
+  const addr = requireAddressAuth(req)
+  if (!addr) {
+    jsonResponse(res, 401, { error: 'auth_required' })
+    return null
+  }
+  return addr
 }
 
 async function maybeCleanupAuth() {
@@ -626,10 +740,20 @@ export async function handleRequest(req, res) {
       const body = await readBody(req)
       const address = (body?.address ?? '').trim()
       const challengeId = (body?.challengeId ?? '').trim()
-      const signature = (body?.signature ?? '').trim()
+      const publicKeyHex = (body?.publicKey ?? '').trim()
+      const tonConnect = body?.tonConnect
+      const simpleSignature = (body?.simpleSignature ?? '').trim()
 
-      if (!address || !challengeId || !signature) {
-        return jsonResponse(res, 400, { error: 'address_challenge_signature_required' })
+      if (!address || !challengeId || !publicKeyHex) {
+        return jsonResponse(res, 400, { error: 'address_challenge_pubkey_required' })
+      }
+
+      const pk = parsePublicKeyHex(publicKeyHex)
+      if (!pk) return jsonResponse(res, 400, { error: 'invalid_public_key' })
+
+      const derivedFromPk = addressFromPublicKeyV4(pk)
+      if (!addressesEqual(derivedFromPk, address)) {
+        return jsonResponse(res, 400, { error: 'public_key_address_mismatch' })
       }
 
       const { rows } = await query('SELECT * FROM auth_challenges WHERE id = $1 AND wallet_address = $2', [
@@ -641,8 +765,26 @@ export async function handleRequest(req, res) {
       if (Number(challenge.expires_at) < nowMs()) return jsonResponse(res, 401, { error: 'challenge_expired' })
       if (challenge.used_at != null) return jsonResponse(res, 401, { error: 'challenge_already_used' })
 
-      const isDevAccepted = signature === 'dev'
-      if (!isDevAccepted) return jsonResponse(res, 401, { error: 'signature_verification_failed' })
+      const message = String(challenge.message ?? '')
+      let ok = false
+
+      if (tonConnect && typeof tonConnect === 'object') {
+        if (tonConnect.payload?.type !== 'text' || tonConnect.payload?.text !== message) {
+          return jsonResponse(res, 400, { error: 'challenge_message_mismatch' })
+        }
+        if (!addressesEqual(String(tonConnect.address ?? ''), address)) {
+          return jsonResponse(res, 400, { error: 'sign_data_address_mismatch' })
+        }
+        ok = verifyTonConnectTextSignData(tonConnect, pk)
+      } else if (simpleSignature) {
+        ok = verifySimpleDetached(message, simpleSignature, pk, address)
+      } else {
+        return jsonResponse(res, 400, { error: 'ton_connect_or_simple_signature_required' })
+      }
+
+      if (!ok) {
+        return jsonResponse(res, 401, { error: 'signature_verification_failed' })
+      }
 
       await query('UPDATE auth_challenges SET used_at = $1 WHERE id = $2', [nowMs(), challengeId])
 
@@ -698,7 +840,8 @@ export async function handleRequest(req, res) {
 
     if (method === 'POST' && url.pathname === '/api/accounts') {
       const body = await readBody(req)
-      const authAddress = requireAddressAuth(req)
+      const authAddress = requireBearerAuth(req, res)
+      if (!authAddress) return
 
       const address = (body?.address ?? '').trim()
       const handle = normalizeHandle(body?.handle ?? '')
@@ -707,7 +850,7 @@ export async function handleRequest(req, res) {
 
       if (!address || !handle) return jsonResponse(res, 400, { error: 'address_handle_required' })
       if (!/^[a-z0-9_]{3,20}$/.test(handle)) return jsonResponse(res, 400, { error: 'invalid_handle' })
-      if (authAddress && authAddress !== address) return jsonResponse(res, 403, { error: 'address_mismatch' })
+      if (authAddress !== address) return jsonResponse(res, 403, { error: 'address_mismatch' })
 
       const existingByAddress = await findAccountByAddress(address)
       const existingByHandle = await findAccountByHandle(handle)
@@ -741,29 +884,46 @@ export async function handleRequest(req, res) {
       const offsetParam = url.searchParams.get('offset')
       const viewer = (url.searchParams.get('viewer') ?? '').trim()
 
-      const { rows: allRows } = await query(
-        `SELECT id, author_wallet_address, author_handle, content, reply_to_post_id, created_at
-         FROM posts ORDER BY created_at DESC, id DESC LIMIT $1`,
-        [MAX_FEED_ROWS],
-      )
-      const sorted = allRows.map((r) => mapPost(r))
+      const { rows: cRows } = await query('SELECT COUNT(*)::int AS c FROM posts')
+      const total = Number(cRows[0]?.c ?? 0)
 
       if (offsetParam != null) {
         const offset = Math.max(0, Number(offsetParam) || 0)
-        const page = sorted.slice(offset, offset + limit)
-        const { rows: cRows } = await query('SELECT COUNT(*)::int AS c FROM posts')
+        const { rows } = await query(
+          `SELECT id, author_wallet_address, author_handle, content, reply_to_post_id, created_at
+           FROM posts ORDER BY created_at DESC, id DESC
+           LIMIT $1 OFFSET $2`,
+          [limit, offset],
+        )
+        const page = rows.map((r) => mapPost(r))
         return jsonResponse(res, 200, {
           posts: await enrichPosts(page, viewer),
-          total: Number(cRows[0]?.c ?? 0),
+          total,
           nextCursor: page.length === limit ? encodeCursor(page[page.length - 1]) : null,
         })
       }
 
-      const { page, nextCursor } = paginateByCursor(sorted, limit, cursor)
-      const { rows: cRows } = await query('SELECT COUNT(*)::int AS c FROM posts')
+      const c = decodeCursor(cursor)
+      const { rows } = c
+        ? await query(
+            `SELECT id, author_wallet_address, author_handle, content, reply_to_post_id, created_at
+             FROM posts
+             WHERE (created_at < $1) OR (created_at = $1 AND id < $2)
+             ORDER BY created_at DESC, id DESC
+             LIMIT $3`,
+            [c.createdAt, c.id, limit],
+          )
+        : await query(
+            `SELECT id, author_wallet_address, author_handle, content, reply_to_post_id, created_at
+             FROM posts ORDER BY created_at DESC, id DESC
+             LIMIT $1`,
+            [limit],
+          )
+      const page = rows.map((r) => mapPost(r))
+      const nextCursor = page.length === limit ? encodeCursor(page[page.length - 1]) : null
       return jsonResponse(res, 200, {
         posts: await enrichPosts(page, viewer),
-        total: Number(cRows[0]?.c ?? 0),
+        total,
         nextCursor,
       })
     }
@@ -775,35 +935,62 @@ export async function handleRequest(req, res) {
       const offsetParam = url.searchParams.get('offset')
       const viewer = (url.searchParams.get('viewer') ?? '').trim()
 
-      const { rows: filteredRows } = await query(
-        `SELECT id, author_wallet_address, author_handle, content, reply_to_post_id, created_at
-         FROM posts WHERE author_wallet_address = $1
-         ORDER BY created_at DESC, id DESC LIMIT $2`,
-        [address, MAX_FEED_ROWS],
+      if (!address) return jsonResponse(res, 400, { error: 'address_required' })
+
+      const { rows: countRows } = await query(
+        `SELECT COUNT(*)::int AS c FROM posts WHERE author_wallet_address = $1`,
+        [address],
       )
-      const filtered = filteredRows.map((r) => mapPost(r))
+      const total = Number(countRows[0]?.c ?? 0)
 
       if (offsetParam != null) {
         const offset = Math.max(0, Number(offsetParam) || 0)
-        const page = filtered.slice(offset, offset + limit)
+        const { rows } = await query(
+          `SELECT id, author_wallet_address, author_handle, content, reply_to_post_id, created_at
+           FROM posts WHERE author_wallet_address = $1
+           ORDER BY created_at DESC, id DESC
+           LIMIT $2 OFFSET $3`,
+          [address, limit, offset],
+        )
+        const page = rows.map((r) => mapPost(r))
         return jsonResponse(res, 200, {
           posts: await enrichPosts(page, viewer),
-          total: filtered.length,
+          total,
           nextCursor: page.length === limit ? encodeCursor(page[page.length - 1]) : null,
         })
       }
 
-      const { page, nextCursor } = paginateByCursor(filtered, limit, cursor)
+      const c = decodeCursor(cursor)
+      const { rows } = c
+        ? await query(
+            `SELECT id, author_wallet_address, author_handle, content, reply_to_post_id, created_at
+             FROM posts
+             WHERE author_wallet_address = $1
+               AND ((created_at < $2) OR (created_at = $2 AND id < $3))
+             ORDER BY created_at DESC, id DESC
+             LIMIT $4`,
+            [address, c.createdAt, c.id, limit],
+          )
+        : await query(
+            `SELECT id, author_wallet_address, author_handle, content, reply_to_post_id, created_at
+             FROM posts WHERE author_wallet_address = $1
+             ORDER BY created_at DESC, id DESC
+             LIMIT $2`,
+            [address, limit],
+          )
+      const page = rows.map((r) => mapPost(r))
+      const nextCursor = page.length === limit ? encodeCursor(page[page.length - 1]) : null
       return jsonResponse(res, 200, {
         posts: await enrichPosts(page, viewer),
-        total: filtered.length,
+        total,
         nextCursor,
       })
     }
 
     if (method === 'POST' && url.pathname === '/api/posts') {
       const body = await readBody(req)
-      const authAddress = requireAddressAuth(req)
+      const authAddress = requireBearerAuth(req, res)
+      if (!authAddress) return
 
       const authorAddress = (body?.authorAddress ?? '').trim()
       const authorHandle = normalizeHandle(body?.authorHandle ?? '')
@@ -814,8 +1001,7 @@ export async function handleRequest(req, res) {
       if (!authorAddress || !authorHandle || !content) {
         return jsonResponse(res, 400, { error: 'authorAddress_authorHandle_content_required' })
       }
-      if (authAddress && authAddress !== authorAddress)
-        return jsonResponse(res, 403, { error: 'address_mismatch' })
+      if (authAddress !== authorAddress) return jsonResponse(res, 403, { error: 'address_mismatch' })
       if (content.length > 500) return jsonResponse(res, 400, { error: 'content_too_long' })
 
       const account = await findAccountByAddress(authorAddress)
@@ -848,35 +1034,56 @@ export async function handleRequest(req, res) {
       const viewer = (url.searchParams.get('viewer') ?? '').trim() || address
       if (!address) return jsonResponse(res, 400, { error: 'address_required' })
 
-      const { rows: homeRows } = await query(
-        `SELECT p.id, p.author_wallet_address, p.author_handle, p.content, p.reply_to_post_id, p.created_at
-         FROM posts p
-         WHERE p.author_wallet_address = $1
-            OR p.author_wallet_address IN (
-                SELECT followee_wallet_address FROM follows WHERE follower_wallet_address = $2
-            )
-         ORDER BY p.created_at DESC, p.id DESC
-         LIMIT $3`,
-        [address, address, MAX_FEED_ROWS],
-      )
-      const sorted = homeRows.map((r) => mapPost(r))
+      const homeWhere = `(
+          p.author_wallet_address = $1
+          OR p.author_wallet_address IN (
+              SELECT followee_wallet_address FROM follows WHERE follower_wallet_address = $2
+          )
+        )`
 
-      const { page, nextCursor } = paginateByCursor(sorted, limit, cursor)
+      const { rows: totalRows } = await query(
+        `SELECT COUNT(*)::int AS c FROM posts p WHERE ${homeWhere}`,
+        [address, address],
+      )
+      const total = Number(totalRows[0]?.c ?? 0)
+
+      const c = decodeCursor(cursor)
+      const { rows: homeRows } = c
+        ? await query(
+            `SELECT p.id, p.author_wallet_address, p.author_handle, p.content, p.reply_to_post_id, p.created_at
+             FROM posts p
+             WHERE ${homeWhere}
+               AND ((p.created_at < $3) OR (p.created_at = $3 AND p.id < $4))
+             ORDER BY p.created_at DESC, p.id DESC
+             LIMIT $5`,
+            [address, address, c.createdAt, c.id, limit],
+          )
+        : await query(
+            `SELECT p.id, p.author_wallet_address, p.author_handle, p.content, p.reply_to_post_id, p.created_at
+             FROM posts p
+             WHERE ${homeWhere}
+             ORDER BY p.created_at DESC, p.id DESC
+             LIMIT $3`,
+            [address, address, limit],
+          )
+      const page = homeRows.map((r) => mapPost(r))
+      const nextCursor = page.length === limit ? encodeCursor(page[page.length - 1]) : null
       return jsonResponse(res, 200, {
         posts: await enrichPosts(page, viewer),
-        total: sorted.length,
+        total,
         nextCursor,
       })
     }
 
     if (method === 'POST' && url.pathname === '/api/follows') {
       const body = await readBody(req)
-      const authAddress = requireAddressAuth(req)
+      const authAddress = requireBearerAuth(req, res)
+      if (!authAddress) return
       const followerAddress = (body?.followerAddress ?? '').trim()
       const followeeAddress = (body?.followeeAddress ?? '').trim()
       if (!followerAddress || !followeeAddress) return jsonResponse(res, 400, { error: 'follower_followee_required' })
       if (followerAddress === followeeAddress) return jsonResponse(res, 400, { error: 'cannot_follow_self' })
-      if (authAddress && authAddress !== followerAddress) return jsonResponse(res, 403, { error: 'address_mismatch' })
+      if (authAddress !== followerAddress) return jsonResponse(res, 403, { error: 'address_mismatch' })
       if (!(await findAccountByAddress(followerAddress)) || !(await findAccountByAddress(followeeAddress))) {
         return jsonResponse(res, 404, { error: 'account_not_found' })
       }
@@ -892,11 +1099,12 @@ export async function handleRequest(req, res) {
 
     if (method === 'POST' && url.pathname === '/api/follows/remove') {
       const body = await readBody(req)
-      const authAddress = requireAddressAuth(req)
+      const authAddress = requireBearerAuth(req, res)
+      if (!authAddress) return
       const followerAddress = (body?.followerAddress ?? '').trim()
       const followeeAddress = (body?.followeeAddress ?? '').trim()
       if (!followerAddress || !followeeAddress) return jsonResponse(res, 400, { error: 'follower_followee_required' })
-      if (authAddress && authAddress !== followerAddress) return jsonResponse(res, 403, { error: 'address_mismatch' })
+      if (authAddress !== followerAddress) return jsonResponse(res, 403, { error: 'address_mismatch' })
       await query(`DELETE FROM follows WHERE follower_wallet_address = $1 AND followee_wallet_address = $2`, [
         followerAddress,
         followeeAddress,
@@ -930,11 +1138,12 @@ export async function handleRequest(req, res) {
 
     if (method === 'POST' && url.pathname === '/api/likes') {
       const body = await readBody(req)
-      const authAddress = requireAddressAuth(req)
+      const authAddress = requireBearerAuth(req, res)
+      if (!authAddress) return
       const postId = (body?.postId ?? '').trim()
       const walletAddress = (body?.walletAddress ?? '').trim()
       if (!postId || !walletAddress) return jsonResponse(res, 400, { error: 'post_wallet_required' })
-      if (authAddress && authAddress !== walletAddress) return jsonResponse(res, 403, { error: 'address_mismatch' })
+      if (authAddress !== walletAddress) return jsonResponse(res, 403, { error: 'address_mismatch' })
       if (!(await findAccountByAddress(walletAddress))) return jsonResponse(res, 404, { error: 'account_not_found' })
       if (!(await findPostById(postId))) return jsonResponse(res, 404, { error: 'post_not_found' })
 
@@ -949,11 +1158,12 @@ export async function handleRequest(req, res) {
 
     if (method === 'POST' && url.pathname === '/api/likes/remove') {
       const body = await readBody(req)
-      const authAddress = requireAddressAuth(req)
+      const authAddress = requireBearerAuth(req, res)
+      if (!authAddress) return
       const postId = (body?.postId ?? '').trim()
       const walletAddress = (body?.walletAddress ?? '').trim()
       if (!postId || !walletAddress) return jsonResponse(res, 400, { error: 'post_wallet_required' })
-      if (authAddress && authAddress !== walletAddress) return jsonResponse(res, 403, { error: 'address_mismatch' })
+      if (authAddress !== walletAddress) return jsonResponse(res, 403, { error: 'address_mismatch' })
 
       await query(`DELETE FROM likes WHERE post_id = $1 AND wallet_address = $2`, [postId, walletAddress])
       return jsonResponse(res, 200, { ok: true })
@@ -988,6 +1198,7 @@ export async function handleRequest(req, res) {
     if (message === 'invalid_json') return jsonResponse(res, 400, { error: 'invalid_json' })
     if (message === 'payload_too_large') return jsonResponse(res, 413, { error: 'payload_too_large' })
     console.error(e)
-    return jsonResponse(res, 500, { error: 'server_error', details: message })
+    const isProd = process.env.NODE_ENV === 'production'
+    return jsonResponse(res, 500, isProd ? { error: 'server_error' } : { error: 'server_error', details: message })
   }
 }

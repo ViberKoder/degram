@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   TonConnectButton,
   TonConnectUIProvider,
@@ -33,10 +33,19 @@ import {
   getPostsByAddress,
   getRecommended,
   likePost,
+  requestAuthChallenge,
   unlikePost,
   unfollow,
   upsertAccount,
+  verifyAuthSession,
 } from './services/degramApi'
+import {
+  clearSession,
+  loadSession,
+  saveSession,
+  sessionMatchesAddress,
+} from './utils/sessionAuth'
+import LocalWalletSignInModal from './components/LocalWalletSignInModal'
 
 function formatAddress(addr: string) {
   if (!addr) return ''
@@ -85,8 +94,77 @@ function InnerApp() {
   const [autoRegistering, setAutoRegistering] = useState(false)
   const [autoRegisterError, setAutoRegisterError] = useState<string | null>(null)
 
+  const [authVersion, setAuthVersion] = useState(0)
+  const [authBusy, setAuthBusy] = useState(false)
+  const [authError, setAuthError] = useState<string | null>(null)
+  const [localSignIn, setLocalSignIn] = useState<{ challengeId: string; message: string } | null>(null)
+
   const tonConnected = tonAddress.trim().length > 0
   const activeAddress = tonConnected ? tonAddress : localWallet?.address ?? ''
+
+  const authReady = useMemo(() => {
+    void authVersion
+    return sessionMatchesAddress(activeAddress)
+  }, [activeAddress, authVersion])
+
+  const getTonPublicKeyHex = useCallback((): string | null => {
+    const acc = tonConnectUI.wallet?.account
+    if (!acc?.publicKey) return null
+    const pk = acc.publicKey as string | Uint8Array
+    if (typeof pk === 'string') return pk.replace(/^0x/i, '').trim()
+    return Buffer.from(pk).toString('hex')
+  }, [tonConnectUI])
+
+  const signInWithTonConnect = useCallback(async () => {
+    if (!activeAddress || !tonConnected) return
+    setAuthBusy(true)
+    setAuthError(null)
+    try {
+      const ch = await requestAuthChallenge(activeAddress)
+      const pkHex = getTonPublicKeyHex()
+      if (!pkHex) throw new Error('Не удалось получить public key из кошелька. Обновите кошелёк / Ton Connect.')
+      const signData = await (tonConnectUI as { signData?: (p: { type: string; text: string }) => Promise<unknown> }).signData?.({
+        type: 'text',
+        text: ch.message,
+      })
+      if (!signData) throw new Error('Кошелёк не поддерживает SignData — обновите Tonkeeper / другой кошелёк.')
+      const { token, expiresAt } = await verifyAuthSession({
+        address: activeAddress,
+        challengeId: ch.challengeId,
+        publicKey: pkHex,
+        tonConnect: signData,
+      })
+      saveSession({ address: activeAddress, token, expiresAt })
+      setAuthVersion((v) => v + 1)
+    } catch (e) {
+      setAuthError((e as Error).message || 'Не удалось войти')
+    } finally {
+      setAuthBusy(false)
+    }
+  }, [activeAddress, tonConnected, tonConnectUI, getTonPublicKeyHex])
+
+  const startLocalSignIn = useCallback(async () => {
+    if (!activeAddress) return
+    setAuthBusy(true)
+    setAuthError(null)
+    try {
+      const ch = await requestAuthChallenge(activeAddress)
+      setLocalSignIn({ challengeId: ch.challengeId, message: ch.message })
+    } catch (e) {
+      setAuthError((e as Error).message || 'Не удалось получить challenge')
+    } finally {
+      setAuthBusy(false)
+    }
+  }, [activeAddress])
+
+  useEffect(() => {
+    if (!activeAddress) return
+    const s = loadSession()
+    if (s && s.address !== activeAddress) {
+      clearSession()
+      setAuthVersion((v) => v + 1)
+    }
+  }, [activeAddress])
 
   useEffect(() => {
     setLocalWallet(loadLocalWallet())
@@ -235,6 +313,8 @@ function InnerApp() {
   }
 
   const handleAuthDisconnect = async () => {
+    clearSession()
+    setAuthVersion((v) => v + 1)
     if (tonConnected) {
       await handleDisconnectTon()
     } else {
@@ -300,6 +380,7 @@ function InnerApp() {
     if (!trimmed) return
     if (!activeAddress) return
     if (!activeAccount) return
+    if (!authReady) return
 
     void (async () => {
       const post = await apiCreatePost({
@@ -327,6 +408,10 @@ function InnerApp() {
 
   const autoRegisterNow = async () => {
     if (!activeAddress) return
+    if (!sessionMatchesAddress(activeAddress)) {
+      setAutoRegisterError('Сначала войдите: подпишите challenge для этого адреса.')
+      return
+    }
     setAutoRegisterError(null)
     setAutoRegistering(true)
     try {
@@ -362,11 +447,12 @@ function InnerApp() {
     if (!activeAddress) return
     if (!accountLoaded) return
     if (activeAccount) return
+    if (!authReady) return
     if (autoRegistering) return
     if (autoRegisterError) return
     void autoRegisterNow()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeAddress, accountLoaded, activeAccount, autoRegistering, autoRegisterError])
+  }, [activeAddress, accountLoaded, activeAccount, authReady, autoRegistering, autoRegisterError])
 
   const [regHandle, setRegHandle] = useState('')
   const [regDisplayName, setRegDisplayName] = useState('')
@@ -374,6 +460,10 @@ function InnerApp() {
 
   const submitRegistration = () => {
     if (!activeAddress) return
+    if (!authReady) {
+      setRegError('Сначала войдите (подпись challenge).')
+      return
+    }
     setRegError(null)
 
     const handle = normalizeHandle(regHandle)
@@ -417,6 +507,7 @@ function InnerApp() {
 
   const handleToggleLike = async (post: Post) => {
     if (!activeAddress) return
+    if (!authReady) return
     const liked = Boolean(post.likedByViewer)
     setLikeBusyId(post.id)
     try {
@@ -442,6 +533,7 @@ function InnerApp() {
 
   const toggleFollowUser = async () => {
     if (!activeAddress || !activeAccount || !userAccount) return
+    if (!authReady) return
     if (userAccount.address === activeAddress) return
     setFollowBusy(true)
     try {
@@ -473,6 +565,7 @@ function InnerApp() {
 
   const followFromRecommended = async (handle: string) => {
     if (!activeAddress) return
+    if (!authReady) return
     const acc = await getAccountByHandle(handle)
     if (!acc || acc.address === activeAddress) return
     try {
@@ -535,6 +628,58 @@ function InnerApp() {
   }
 
   if (activeAddress && accountLoaded && !activeAccount) {
+    if (!authReady) {
+      return (
+        <div className="container">
+          <div className="panel" style={{ marginTop: 20, padding: 20 }}>
+            <div className="auth-title">Подтвердите кошелёк</div>
+            <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
+              Подпишите одноразовое сообщение в кошельке (без перевода TON). После этого мы создадим профиль.
+            </div>
+            {authError && <div className="error" style={{ marginTop: 12 }}>{authError}</div>}
+            <div style={{ marginTop: 16, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+              {tonConnected && (
+                <button
+                  type="button"
+                  className="btn primary"
+                  disabled={authBusy}
+                  onClick={() => void signInWithTonConnect()}
+                >
+                  {authBusy ? '…' : 'Подписать через TON Connect'}
+                </button>
+              )}
+              {!tonConnected && localWallet && (
+                <button
+                  type="button"
+                  className="btn primary"
+                  disabled={authBusy}
+                  onClick={() => void startLocalSignIn()}
+                >
+                  {authBusy ? '…' : 'Войти по seed phrase'}
+                </button>
+              )}
+            </div>
+            <div style={{ marginTop: 14 }} className="muted small">
+              Нужен кошелёк с поддержкой SignData (актуальный Tonkeeper и др.).
+            </div>
+            <div className="row" style={{ marginTop: 16 }}>
+              <button className="btn danger" onClick={handleAuthDisconnect} type="button">
+                Отключить
+              </button>
+            </div>
+          </div>
+          {localSignIn && (
+            <LocalWalletSignInModal
+              address={activeAddress}
+              challengeId={localSignIn.challengeId}
+              message={localSignIn.message}
+              onClose={() => setLocalSignIn(null)}
+              onSuccess={() => setAuthVersion((v) => v + 1)}
+            />
+          )}
+        </div>
+      )
+    }
     return (
       <div className="container">
         <div className="panel" style={{ marginTop: 20, padding: 20 }}>
@@ -710,7 +855,7 @@ function InnerApp() {
                           type="button"
                           className={`btn primary ${userFollowing ? '' : ''}`}
                           onClick={() => void toggleFollowUser()}
-                          disabled={followBusy}
+                          disabled={followBusy || !authReady}
                         >
                           {userFollowing ? 'Вы подписаны' : 'Подписаться'}
                         </button>
@@ -758,6 +903,37 @@ function InnerApp() {
               </div>
             ) : (
               <>
+                {activeAccount && !authReady && (
+                  <div className="panel" style={{ padding: 16, marginBottom: 12 }}>
+                    <div style={{ fontWeight: 800 }}>Вход в API</div>
+                    <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
+                      Подпишите challenge, чтобы публиковать посты, лайкать и подписываться.
+                    </div>
+                    {authError && <div className="error" style={{ marginTop: 8 }}>{authError}</div>}
+                    <div style={{ marginTop: 12, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                      {tonConnected && (
+                        <button
+                          type="button"
+                          className="btn primary"
+                          disabled={authBusy}
+                          onClick={() => void signInWithTonConnect()}
+                        >
+                          {authBusy ? '…' : 'Подписать (TON Connect)'}
+                        </button>
+                      )}
+                      {!tonConnected && localWallet && (
+                        <button
+                          type="button"
+                          className="btn primary"
+                          disabled={authBusy}
+                          onClick={() => void startLocalSignIn()}
+                        >
+                          {authBusy ? '…' : 'Войти по seed'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
                 <div className="feed-tabs">
                   <button
                     type="button"
@@ -807,7 +983,7 @@ function InnerApp() {
                       </button>
                     </div>
                   )}
-                  <Composer onSubmit={handleCreatePost} />
+                  <Composer onSubmit={handleCreatePost} disabled={!authReady} />
                 </div>
 
                 <div className="feed">
@@ -887,6 +1063,7 @@ function InnerApp() {
                           <button
                             type="button"
                             className="btn mini"
+                            disabled={!authReady}
                             onClick={() => void followFromRecommended(t.handle)}
                           >
                             +
@@ -906,6 +1083,15 @@ function InnerApp() {
           </aside>
         </div>
       </div>
+      {localSignIn && activeAccount && (
+        <LocalWalletSignInModal
+          address={activeAddress}
+          challengeId={localSignIn.challengeId}
+          message={localSignIn.message}
+          onClose={() => setLocalSignIn(null)}
+          onSuccess={() => setAuthVersion((v) => v + 1)}
+        />
+      )}
     </div>
   )
 }
@@ -951,7 +1137,13 @@ function EmptyState({ text }: { text: string }) {
   )
 }
 
-function Composer({ onSubmit }: { onSubmit: (content: string) => void }) {
+function Composer({
+  onSubmit,
+  disabled,
+}: {
+  onSubmit: (content: string) => void
+  disabled?: boolean
+}) {
   const [content, setContent] = useState('')
 
   return (
@@ -960,6 +1152,7 @@ function Composer({ onSubmit }: { onSubmit: (content: string) => void }) {
         value={content}
         onChange={(e) => setContent(e.target.value)}
         placeholder="Что нового?"
+        disabled={disabled}
       />
       <div className="row">
         <div className="muted mono" style={{ fontSize: 12 }}>
@@ -972,7 +1165,7 @@ function Composer({ onSubmit }: { onSubmit: (content: string) => void }) {
             setContent('')
           }}
           type="button"
-          disabled={content.trim().length === 0}
+          disabled={disabled || content.trim().length === 0}
         >
           Опубликовать
         </button>

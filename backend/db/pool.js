@@ -12,9 +12,8 @@ function inferSsl(connectionString) {
 }
 
 function normalizeConnectionString(connectionString) {
-  // Vercel/Supabase often provide sslmode=require. With pg v8 this can still
-  // fail in serverless if chain validation is strict in runtime. Default to
-  // no-verify unless strict mode is explicitly requested.
+  // Remote Postgres often uses sslmode=require. With pg v8, strict TLS validation
+  // can fail in some runtimes; default to no-verify unless strict mode is on.
   if (/localhost|127\.0\.0\.1/.test(connectionString)) return connectionString
   if (process.env.PG_SSL_REJECT_UNAUTHORIZED === 'true') return connectionString
   try {
@@ -29,17 +28,12 @@ function normalizeConnectionString(connectionString) {
 }
 
 /**
- * Serverless-friendly singleton.
- * Preferred native vars:
- * - POSTGRES_URL / POSTGRES_URL_NON_POOLING
- * Also supports legacy aliases for compatibility.
+ * Singleton pool. Use POSTGRES_URL or POSTGRES_URL_NON_POOLING; DATABASE_URL is supported.
  */
 function resolveConnectionString() {
   return (
     process.env.POSTGRES_URL ??
     process.env.POSTGRES_URL_NON_POOLING ??
-    process.env.SUPABASE_DB_URL ??
-    process.env.SUPABASE_DATABASE_URL ??
     process.env.DATABASE_URL ??
     ''
   )
@@ -50,7 +44,7 @@ export function getPool() {
   const connectionString = resolveConnectionString()
   if (!connectionString) {
     throw new Error(
-      'POSTGRES_URL (or POSTGRES_URL_NON_POOLING / SUPABASE_DB_URL / DATABASE_URL) is required (PostgreSQL connection string)',
+      'POSTGRES_URL (or POSTGRES_URL_NON_POOLING / DATABASE_URL) is required (PostgreSQL connection string)',
     )
   }
   pool = new Pool({
