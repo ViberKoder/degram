@@ -48,6 +48,13 @@ import {
 } from './utils/sessionAuth'
 import { extractTonProof } from './utils/tonConnectProof'
 
+function degramErrorToUserMessage(msg: string): string {
+  if (msg === 'api_unreachable') {
+    return 'Сервер API недоступен (404). В Vercel задайте Root Directory на корень репозитория (не frontend), проверьте /api/health.'
+  }
+  return msg
+}
+
 function formatAddress(addr: string) {
   if (!addr) return ''
   if (addr.length <= 12) return addr
@@ -187,7 +194,11 @@ function InnerApp() {
           setAuthError(null)
         } catch (e) {
           const msg = (e as Error).message || 'ton_proof_invalid'
-          setAuthError(msg === 'ton_proof_invalid' ? 'Не удалось подтвердить кошелёк. Отключите и подключите снова.' : msg)
+          if (msg === 'ton_proof_invalid') {
+            setAuthError('Не удалось подтвердить кошелёк. Отключите и подключите снова.')
+          } else {
+            setAuthError(degramErrorToUserMessage(msg))
+          }
         } finally {
           setAuthBusy(false)
           tonProofSubmitLock.current = false
@@ -641,7 +652,7 @@ function InnerApp() {
             onClose={() => setShowCreateWalletModal(false)}
             onCreated={() => setLocalWallet(loadLocalWallet())}
             onSessionReady={() => setAuthVersion((v) => v + 1)}
-            onAuthError={(msg) => setAuthError(msg)}
+            onAuthError={(msg) => setAuthError(degramErrorToUserMessage(msg))}
           />
         )}
       </div>

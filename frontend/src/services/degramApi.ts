@@ -47,7 +47,11 @@ function toErrorMessage(status: number, statusText: string, payload: any, rawTex
   if (payload?.error && typeof payload.error === 'string') return payload.error
   if (payload?.details && typeof payload.details === 'string') return payload.details
   if (status === 500) return 'server_error'
-  if (status === 404) return 'not_found'
+  if (status === 404) {
+    const t = (rawText ?? '').trimStart()
+    if (t.startsWith('<') || t.startsWith('<!')) return 'api_unreachable'
+    return 'not_found'
+  }
   if (rawText) return rawText.slice(0, 180)
   return statusText || 'Request failed'
 }

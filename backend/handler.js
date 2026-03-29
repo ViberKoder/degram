@@ -137,6 +137,46 @@ function normalizeRequestPathname(raw) {
   return p
 }
 
+function joinCatchAllPathParam(pv) {
+  if (pv == null) return ''
+  if (Array.isArray(pv)) return pv.map(String).filter(Boolean).join('/')
+  return String(pv).trim().replace(/^\/+|\/+$/g, '')
+}
+
+/** True when pathname already includes /api/... with at least one segment after api. */
+function apiPathLooksComplete(pathname) {
+  const segs = pathname.split('/').filter(Boolean)
+  return pathname.startsWith('/api/') && segs.length >= 2
+}
+
+/**
+ * Vercel `api/[...path].js` often sets `req.query.path` (array or string) while `req.url` is only `/` or `/api`.
+ * Plain Node (local dev) has no `req.query`; we use `req.url` only.
+ */
+function resolveRoutingUrl(req) {
+  const xf = req.headers['x-forwarded-host']
+  const host =
+    (typeof xf === 'string' && xf.split(',')[0].trim()) || req.headers.host || 'localhost'
+  const raw = typeof req.url === 'string' && req.url.length > 0 ? req.url : '/'
+  const url = new URL(raw, `http://${host}`)
+
+  const q = req.query
+  const pv = q && typeof q === 'object' && 'path' in q ? q.path : undefined
+  const catchAll = joinCatchAllPathParam(pv)
+
+  if (catchAll) {
+    if (!apiPathLooksComplete(url.pathname)) {
+      url.pathname = normalizeRequestPathname(`/api/${catchAll}`)
+    } else {
+      url.pathname = normalizeRequestPathname(url.pathname)
+    }
+  } else {
+    url.pathname = normalizeRequestPathname(url.pathname)
+  }
+
+  return url
+}
+
 function securityHeaders() {
   return {
     'X-Content-Type-Options': 'nosniff',
@@ -798,9 +838,8 @@ export async function handleRequest(req, res) {
     const ip = getIp(req)
     if (!(await checkRateLimit(ip, 'global'))) return jsonResponse(res, 429, { error: 'rate_limited' })
 
-    const host = req.headers.host ?? 'localhost'
-    const url = new URL(req.url ?? '/', `http://${host}`)
-    const pathname = normalizeRequestPathname(url.pathname)
+    const url = resolveRoutingUrl(req)
+    const pathname = url.pathname
     const method = req.method ?? 'GET'
 
     if (method === 'OPTIONS') return jsonResponse(res, 204, {})
