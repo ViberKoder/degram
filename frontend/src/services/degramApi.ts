@@ -139,6 +139,30 @@ export async function submitTonProof(body: TonProofRequestBody) {
   })
 }
 
+export async function requestAuthChallenge(address: string) {
+  return requestJson<{ challengeId: string; message: string; expiresAt: number }>('/api/auth/challenge', {
+    method: 'POST',
+    body: JSON.stringify({ address }),
+  })
+}
+
+export async function verifyAuthSession(params: {
+  address: string
+  challengeId: string
+  publicKey: string
+  simpleSignature: string
+}) {
+  return requestJson<{ token: string; expiresAt: number }>('/api/auth/verify', {
+    method: 'POST',
+    body: JSON.stringify({
+      address: params.address,
+      challengeId: params.challengeId,
+      publicKey: params.publicKey,
+      simpleSignature: params.simpleSignature,
+    }),
+  })
+}
+
 export async function upsertAccount(params: {
   address: string
   handle: string

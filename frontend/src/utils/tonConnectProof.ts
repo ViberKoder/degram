@@ -12,31 +12,45 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null
 }
 
-/** Extract successful ton_proof from account.connectItems (object or array). */
-export function extractTonProof(account: { connectItems?: unknown } | null | undefined): TonProofForApi | null {
-  const items = account?.connectItems
-  if (items == null) return null
-  const list: unknown[] = Array.isArray(items) ? items : Object.values(items as object)
-  for (const it of list) {
-    if (!isRecord(it) || it.name !== 'tonProof') continue
-    const proof = it.proof
-    if (!isRecord(proof) || 'error' in proof) continue
-    if (typeof proof.timestamp !== 'number') continue
-    const domain = proof.domain
-    if (!isRecord(domain) || typeof domain.value !== 'string') continue
-    const lengthBytes = Number(domain.lengthBytes ?? domain.length_bytes)
-    if (!Number.isFinite(lengthBytes)) continue
-    const payload = proof.payload
-    const signature = proof.signature
-    const stateInit = proof.state_init ?? proof.stateInit
-    if (typeof payload !== 'string' || typeof signature !== 'string' || typeof stateInit !== 'string') continue
-    return {
-      timestamp: proof.timestamp,
-      domain: { lengthBytes, value: domain.value },
-      payload,
-      signature,
-      state_init: stateInit,
-    }
+function parseProofPayload(proof: unknown): TonProofForApi | null {
+  if (!isRecord(proof) || 'error' in proof) return null
+  if (typeof proof.timestamp !== 'number') return null
+  const domain = proof.domain
+  if (!isRecord(domain) || typeof domain.value !== 'string') return null
+  const lengthBytes = Number(domain.lengthBytes ?? domain.length_bytes)
+  if (!Number.isFinite(lengthBytes)) return null
+  const payload = proof.payload
+  const signature = proof.signature
+  const stateInit = proof.state_init ?? proof.stateInit
+  if (typeof payload !== 'string' || typeof signature !== 'string' || typeof stateInit !== 'string') return null
+  return {
+    timestamp: proof.timestamp,
+    domain: { lengthBytes, value: domain.value },
+    payload,
+    signature,
+    state_init: stateInit,
+  }
+}
+
+function walkForTonProof(node: unknown, seen = new Set<unknown>()): TonProofForApi | null {
+  if (node == null || typeof node !== 'object') return null
+  if (seen.has(node)) return null
+  seen.add(node)
+
+  const o = node as Record<string, unknown>
+  if (o.name === 'tonProof' && o.proof != null) {
+    const parsed = parseProofPayload(o.proof)
+    if (parsed) return parsed
+  }
+
+  for (const v of Object.values(o)) {
+    const r = walkForTonProof(v, seen)
+    if (r) return r
   }
   return null
+}
+
+/** Extract successful ton_proof from account.connectItems (any nesting). */
+export function extractTonProof(account: { connectItems?: unknown } | null | undefined): TonProofForApi | null {
+  return walkForTonProof(account?.connectItems)
 }

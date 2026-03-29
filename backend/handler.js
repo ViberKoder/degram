@@ -5,6 +5,11 @@ import {
   createSignedTonProofPayload,
   verifyTonConnectProof,
 } from './auth/verifyTonProof.js'
+import {
+  verifySimpleDetached,
+  addressFromPublicKeyV4,
+  addressesEqual,
+} from './auth/verifySignature.js'
 
 const IS_PRODUCTION = process.env.NODE_ENV === 'production'
 
@@ -49,6 +54,7 @@ const AUTH_SECRET = loadAuthSecret()
 
 const MAX_BODY_BYTES = 128 * 1024
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000
+const CHALLENGE_TTL_MS = 5 * 60 * 1000
 const REQUESTS_PER_MINUTE = Number(process.env.REQUESTS_PER_MINUTE ?? 300)
 const HOLDINGS_REQUESTS_PER_MINUTE = Number(process.env.HOLDINGS_REQUESTS_PER_MINUTE ?? 60)
 // "Blockchain vitrine" (NFT / Jettons / DNS + USD valuation).
@@ -721,6 +727,17 @@ function requireAddressAuth(req) {
   return parsed ? parsed.address : null
 }
 
+function parsePublicKeyHex(hex) {
+  try {
+    const s = String(hex ?? '').replace(/^0x/i, '').trim()
+    if (!s) return null
+    const b = Buffer.from(s, 'hex')
+    return b.length === 32 ? b : null
+  } catch {
+    return null
+  }
+}
+
 /**
  * Все мутации требуют валидный Bearer session token.
  */
@@ -799,6 +816,82 @@ export async function handleRequest(req, res) {
 
       const ok = await verifyTonConnectProof(body, AUTH_SECRET, fetchPublicKeyFromTonapi)
       if (!ok) return jsonResponse(res, 401, { error: 'ton_proof_invalid' })
+
+      const token = createSessionToken(address)
+      const expiresAt = nowMs() + SESSION_TTL_MS
+      await query(
+        `INSERT INTO sessions (id, wallet_address, token, issued_at, expires_at, ip)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [createId(), address, token, nowMs(), expiresAt, ip],
+      )
+
+      return jsonResponse(res, 200, { token, expiresAt })
+    }
+
+    if (method === 'POST' && url.pathname === '/api/auth/challenge') {
+      const body = await readBody(req)
+      const address = (body?.address ?? '').trim()
+      if (!address) return jsonResponse(res, 400, { error: 'address_required' })
+
+      const challengeId = createId()
+      const nonce = createId()
+      const issuedAt = nowMs()
+      const expiresAt = issuedAt + CHALLENGE_TTL_MS
+      const message = `Degram auth challenge\nAddress: ${address}\nNonce: ${nonce}\nExpiresAt: ${expiresAt}`
+
+      await query(
+        `INSERT INTO auth_challenges (id, wallet_address, nonce, message, issued_at, expires_at, used_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NULL)`,
+        [challengeId, address, nonce, message, issuedAt, expiresAt],
+      )
+      return jsonResponse(res, 200, { challengeId, message, expiresAt })
+    }
+
+    if (method === 'POST' && url.pathname === '/api/auth/verify') {
+      const body = await readBody(req)
+      const address = (body?.address ?? '').trim()
+      const challengeId = (body?.challengeId ?? '').trim()
+      const publicKeyHex = String(body?.publicKey ?? body?.public_key ?? '').replace(/^0x/i, '').trim()
+      const simpleSignature = (body?.simpleSignature ?? body?.simple_signature ?? '').trim()
+
+      if (!address || !challengeId || !publicKeyHex) {
+        return jsonResponse(res, 400, { error: 'address_challenge_pubkey_required' })
+      }
+
+      const pk = parsePublicKeyHex(publicKeyHex)
+      if (!pk) return jsonResponse(res, 400, { error: 'invalid_public_key' })
+
+      const derivedFromPk = addressFromPublicKeyV4(pk)
+      if (!addressesEqual(derivedFromPk, address)) {
+        return jsonResponse(res, 400, { error: 'public_key_address_mismatch' })
+      }
+
+      const { rows } = await query('SELECT * FROM auth_challenges WHERE id = $1 AND wallet_address = $2', [
+        challengeId,
+        address,
+      ])
+      const challenge = rows[0]
+      if (!challenge) return jsonResponse(res, 401, { error: 'invalid_challenge' })
+      if (Number(challenge.expires_at) < nowMs()) return jsonResponse(res, 401, { error: 'challenge_expired' })
+      if (challenge.used_at != null) return jsonResponse(res, 401, { error: 'challenge_already_used' })
+
+      const message = String(challenge.message ?? '')
+      if (!simpleSignature) {
+        return jsonResponse(res, 400, { error: 'simple_signature_required' })
+      }
+
+      const ok = verifySimpleDetached(message, simpleSignature, pk, address)
+      if (!ok) {
+        return jsonResponse(res, 401, { error: 'signature_verification_failed' })
+      }
+
+      const consumed = await query(
+        `UPDATE auth_challenges SET used_at = $1 WHERE id = $2 AND used_at IS NULL RETURNING id`,
+        [nowMs(), challengeId],
+      )
+      if (!consumed.rows[0]) {
+        return jsonResponse(res, 401, { error: 'challenge_already_used' })
+      }
 
       const token = createSessionToken(address)
       const expiresAt = nowMs() + SESSION_TTL_MS

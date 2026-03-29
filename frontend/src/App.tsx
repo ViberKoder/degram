@@ -5,8 +5,20 @@ import {
   useTonAddress,
   useTonConnectUI,
 } from '@tonconnect/ui-react'
-import { Account, AccountStats, Post, hashToHsl, isValidHandle, normalizeHandle } from './utils/storage'
+import {
+  Account,
+  AccountStats,
+  LocalWallet,
+  Post,
+  hashToHsl,
+  isValidHandle,
+  loadLocalWallet,
+  clearLocalWallet,
+  normalizeHandle,
+} from './utils/storage'
 import './styles/index.css'
+import CreateWalletModal from './components/CreateWalletModal'
+import LocalWalletSignInModal from './components/LocalWalletSignInModal'
 import WalletView from './components/WalletView'
 import PostCard from './components/PostCard'
 import WalletHoldingsCard from './components/WalletHoldingsCard'
@@ -50,6 +62,24 @@ function nowTimeLabel(ts: number) {
   return new Date(ts).toLocaleDateString()
 }
 
+function normalizeWalletPublicKey(account: { publicKey?: unknown }): string | null {
+  const pkRaw = account.publicKey
+  if (pkRaw == null) return null
+  if (typeof pkRaw === 'string') {
+    const s = pkRaw.replace(/^0x/i, '').trim()
+    if (/^[0-9a-fA-F]{64}$/.test(s)) return s.toLowerCase()
+    try {
+      const b = Buffer.from(s, 'base64')
+      if (b.length === 32) return b.toString('hex')
+    } catch {
+      return null
+    }
+    return null
+  }
+  if (pkRaw instanceof Uint8Array && pkRaw.length === 32) return Buffer.from(pkRaw).toString('hex')
+  return null
+}
+
 function InnerApp() {
   const tonAddress = useTonAddress(true)
   const [tonConnectUI] = useTonConnectUI()
@@ -65,6 +95,9 @@ function InnerApp() {
   const [recommended, setRecommended] = useState<Array<{ handle: string; count: number }>>([])
   const [accountLoaded, setAccountLoaded] = useState(false)
   const [view, setView] = useState<'feed' | 'profile' | 'user' | 'wallet'>('feed')
+  const [localWallet, setLocalWallet] = useState<LocalWallet | null>(() => loadLocalWallet())
+  const [showCreateWalletModal, setShowCreateWalletModal] = useState(false)
+  const [localReauthOpen, setLocalReauthOpen] = useState(false)
 
   const [myProfilePosts, setMyProfilePosts] = useState<Post[]>([])
   const [viewingUserHandle, setViewingUserHandle] = useState<string | null>(null)
@@ -86,7 +119,7 @@ function InnerApp() {
   const [authError, setAuthError] = useState<string | null>(null)
 
   const tonConnected = tonAddress.trim().length > 0
-  const activeAddress = tonAddress.trim()
+  const activeAddress = tonConnected ? tonAddress.trim() : localWallet?.address ?? ''
 
   const authReady = useMemo(() => {
     void authVersion
@@ -94,7 +127,12 @@ function InnerApp() {
   }, [activeAddress, authVersion])
 
   useEffect(() => {
+    setLocalWallet(loadLocalWallet())
+  }, [])
+
+  useEffect(() => {
     let cancelled = false
+    tonConnectUI.setConnectRequestParameters({ state: 'loading' })
     async function refreshPayload() {
       try {
         const { payload } = await getTonProofPayload()
@@ -129,12 +167,8 @@ function InnerApp() {
       const proof = extractTonProof(wallet.account)
       if (!proof) return
 
-      const pkRaw = wallet.account.publicKey
-      let publicKeyHex: string
-      if (typeof pkRaw === 'string') publicKeyHex = pkRaw.replace(/^0x/i, '').trim()
-      else if (pkRaw instanceof Uint8Array) publicKeyHex = Buffer.from(pkRaw).toString('hex')
-      else return
-      if (publicKeyHex.length !== 64) return
+      const publicKeyHex = normalizeWalletPublicKey(wallet.account)
+      if (!publicKeyHex) return
 
       if (tonProofSubmitLock.current) return
       tonProofSubmitLock.current = true
@@ -159,18 +193,6 @@ function InnerApp() {
           tonProofSubmitLock.current = false
         }
       })()
-    })
-  }, [tonConnectUI])
-
-  useEffect(() => {
-    void tonConnectUI.connectionRestored.then((ok) => {
-      if (!ok) return
-      const w = tonConnectUI.wallet
-      if (!w?.account?.address) return
-      if (sessionMatchesAddress(w.account.address)) return
-      if (!extractTonProof(w.account)) {
-        setAuthError('Сессия сброшена. Нажмите «Выйти» и подключите кошелёк ещё раз.')
-      }
     })
   }, [tonConnectUI])
 
@@ -319,11 +341,22 @@ function InnerApp() {
     await tonConnectUI.disconnect()
   }
 
+  const handleClearLocalWallet = () => {
+    clearLocalWallet()
+    setLocalWallet(null)
+    setView('feed')
+  }
+
   const handleAuthDisconnect = async () => {
     clearSession()
     setAuthVersion((v) => v + 1)
     setAuthError(null)
-    await handleDisconnectTon()
+    setLocalReauthOpen(false)
+    if (tonConnected) {
+      await handleDisconnectTon()
+    } else {
+      handleClearLocalWallet()
+    }
   }
 
   const patchPostEverywhere = useCallback((postId: string, patch: Partial<Post>) => {
@@ -413,7 +446,7 @@ function InnerApp() {
   const autoRegisterNow = async () => {
     if (!activeAddress) return
     if (!sessionMatchesAddress(activeAddress)) {
-      setAutoRegisterError('Сначала войдите через TON Connect (подтверждение в кошельке при подключении).')
+      setAutoRegisterError('Сначала войдите: TON Connect (подтверждение при подключении) или локальный кошелёк после создания.')
       return
     }
     setAutoRegisterError(null)
@@ -465,7 +498,7 @@ function InnerApp() {
   const submitRegistration = () => {
     if (!activeAddress) return
     if (!authReady) {
-      setRegError('Сначала войдите через TON Connect.')
+      setRegError('Сначала войдите (TON Connect или локальный кошелёк).')
       return
     }
     setRegError(null)
@@ -589,14 +622,28 @@ function InnerApp() {
           <div className="panel" style={{ padding: 20 }}>
             <div className="auth-title">Добро пожаловать в Degram</div>
             <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
-              Подключи кошелёк через <span className="mono">TON Connect</span>. Подтверждение запрашивается один раз при
-              подключении (без отдельной подписи и без seed phrase на сайте).
+              Подключи существующий кошелёк через <span className="mono">TON Connect</span> или создай новый прямо в Degram —
+              после сохранения seed ты сразу попадёшь в ленту (подпись для API выполняется в браузере, seed на сервер не
+              уходит).
             </div>
-            <div style={{ marginTop: 20, display: 'flex', justifyContent: 'center' }}>
-              <TonConnectButton />
+            <div style={{ marginTop: 20, display: 'grid', gap: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'center' }}>
+                <TonConnectButton />
+              </div>
+              <button className="btn primary" type="button" onClick={() => setShowCreateWalletModal(true)}>
+                Создать новый кошелёк в Degram
+              </button>
             </div>
           </div>
         </div>
+        {showCreateWalletModal && (
+          <CreateWalletModal
+            onClose={() => setShowCreateWalletModal(false)}
+            onCreated={() => setLocalWallet(loadLocalWallet())}
+            onSessionReady={() => setAuthVersion((v) => v + 1)}
+            onAuthError={(msg) => setAuthError(msg)}
+          />
+        )}
       </div>
     )
   }
@@ -618,24 +665,45 @@ function InnerApp() {
 
   if (activeAddress && accountLoaded && !activeAccount) {
     if (!authReady) {
+      const isLocalOnly = Boolean(localWallet && !tonConnected)
       return (
         <div className="container">
           <div className="panel" style={{ marginTop: 20, padding: 20 }}>
-            <div className="auth-title">Вход через TON Connect</div>
+            <div className="auth-title">{isLocalOnly ? 'Вход локального кошелька' : 'Вход через TON Connect'}</div>
             <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
               {authBusy
-                ? 'Подтвердите запрос в кошельке (это часть подключения, без перевода TON).'
+                ? isLocalOnly
+                  ? 'Выполняем вход…'
+                  : 'Подтвердите запрос в кошельке при подключении (без перевода TON).'
                 : authError
                   ? authError
-                  : 'Завершите подключение кошелька. Если окно кошелька не появилось, отключитесь и подключите снова.'}
+                  : isLocalOnly
+                    ? 'Нужна сессия API. Нажми «Войти по seed» и введи фразу один раз, либо подключи этот адрес через TON Connect в Tonkeeper.'
+                    : 'Завершите подключение в кошельке. Если запрос не пришёл — отключитесь и подключите снова.'}
             </div>
             {authError && !authBusy && <div className="error" style={{ marginTop: 12 }}>{authError}</div>}
-            <div className="row" style={{ marginTop: 16 }}>
+            <div className="row" style={{ marginTop: 16, flexWrap: 'wrap', gap: 12 }}>
+              {isLocalOnly && (
+                <button className="btn primary" type="button" onClick={() => setLocalReauthOpen(true)} disabled={authBusy}>
+                  Войти по seed
+                </button>
+              )}
               <button className="btn danger" onClick={() => void handleAuthDisconnect()} type="button">
-                Выйти / отключить кошелёк
+                {isLocalOnly ? 'Сбросить локальный кошелёк' : 'Отключить кошелёк'}
               </button>
             </div>
           </div>
+          {localReauthOpen && isLocalOnly && (
+            <LocalWalletSignInModal
+              address={activeAddress}
+              onClose={() => setLocalReauthOpen(false)}
+              onSuccess={() => {
+                setAuthVersion((v) => v + 1)
+                setLocalReauthOpen(false)
+                setAuthError(null)
+              }}
+            />
+          )}
         </div>
       )
     }
@@ -728,13 +796,19 @@ function InnerApp() {
               type="button"
             >
               <span>Wallet</span>
-              <span className="muted mono">TON</span>
+              <span className="muted mono">{tonConnected ? 'TON' : 'local'}</span>
             </button>
           </aside>
 
           <main className="panel main">
             {view === 'wallet' ? (
-              <WalletView activeAddress={activeAddress} onDisconnectTon={handleDisconnectTon} />
+              <WalletView
+                activeAddress={activeAddress}
+                tonConnected={tonConnected}
+                localWallet={localWallet}
+                onDisconnectTon={handleDisconnectTon}
+                onClearLocalWallet={handleClearLocalWallet}
+              />
             ) : view === 'profile' ? (
               <div className="feed">
                 <div className="profile-hero">
@@ -861,13 +935,23 @@ function InnerApp() {
                     <div style={{ fontWeight: 800 }}>Вход в приложение</div>
                     <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
                       {authBusy
-                        ? 'Подтвердите запрос в кошельке…'
-                        : authError || 'Подключите кошелёк заново или подтвердите запрос в кошельке.'}
+                        ? localWallet && !tonConnected
+                          ? 'Вход…'
+                          : 'Подтвердите запрос в кошельке…'
+                        : authError ||
+                          (localWallet && !tonConnected
+                            ? 'Сессия истекла. Войди по seed или используй TON Connect.'
+                            : 'Подключите кошелёк заново или подтвердите запрос в кошельке.')}
                     </div>
                     {authError && !authBusy && <div className="error" style={{ marginTop: 8 }}>{authError}</div>}
-                    <div style={{ marginTop: 12 }}>
+                    <div style={{ marginTop: 12, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                      {localWallet && !tonConnected && (
+                        <button type="button" className="btn primary" onClick={() => setLocalReauthOpen(true)}>
+                          Войти по seed
+                        </button>
+                      )}
                       <button type="button" className="btn danger" onClick={() => void handleAuthDisconnect()}>
-                        Выйти из кошелька
+                        Выйти
                       </button>
                     </div>
                   </div>
@@ -1021,6 +1105,17 @@ function InnerApp() {
           </aside>
         </div>
       </div>
+      {localReauthOpen && activeAddress && localWallet && !tonConnected && (
+        <LocalWalletSignInModal
+          address={activeAddress}
+          onClose={() => setLocalReauthOpen(false)}
+          onSuccess={() => {
+            setAuthVersion((v) => v + 1)
+            setLocalReauthOpen(false)
+            setAuthError(null)
+          }}
+        />
+      )}
     </div>
   )
 }
