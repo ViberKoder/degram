@@ -116,23 +116,26 @@ export async function getPostById(params: { id: string; viewerAddress?: string }
   return requestJson<{ post: Post }>(`/api/posts/by-id?id=${encodeURIComponent(params.id)}${v}`)
 }
 
-export async function requestAuthChallenge(address: string) {
-  return requestJson<{ challengeId: string; message: string; expiresAt: number }>('/api/auth/challenge', {
-    method: 'POST',
-    body: JSON.stringify({ address }),
-  })
+export async function getTonProofPayload() {
+  return requestJson<{ payload: string; expiresAt: number }>('/api/auth/ton-proof-payload')
 }
 
-export async function verifyAuthSession(params: {
+export type TonProofRequestBody = {
   address: string
-  challengeId: string
-  publicKey: string
-  tonConnect?: unknown
-  simpleSignature?: string
-}) {
-  return requestJson<{ token: string; expiresAt: number }>('/api/auth/verify', {
+  public_key: string
+  proof: {
+    timestamp: number
+    domain: { lengthBytes: number; value: string }
+    payload: string
+    signature: string
+    state_init: string
+  }
+}
+
+export async function submitTonProof(body: TonProofRequestBody) {
+  return requestJson<{ token: string; expiresAt: number }>('/api/auth/ton-proof', {
     method: 'POST',
-    body: JSON.stringify(params),
+    body: JSON.stringify(body),
   })
 }
 

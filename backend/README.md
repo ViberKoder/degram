@@ -30,12 +30,14 @@ API: `http://localhost:3002` (порт `PORT`).
 | `PG_SSL_REJECT_UNAUTHORIZED` | По умолчанию `false` для managed Postgres; `true` если цепочка сертификата доверена в рантайме |
 | `AUTH_SECRET` | Секрет для сессионных токенов: в **production** обязателен, **≥ 32 символов** |
 | `CORS_ORIGIN` | Один URL или несколько через запятую. В production без значения на Vercel подставляется `https://$VERCEL_URL` |
-| `SITE_HOST` | Без схемы, для TonConnect SignData вместе с `SIGN_DATA_ALLOWED_DOMAINS` |
+| `SITE_HOST` | Без схемы: добавляется в домены для **ton_proof** (и SignData, если используется) |
+| `TON_PROOF_ALLOWED_DOMAINS` | Домены из proof (через запятую). Иначе: `SIGN_DATA_ALLOWED_DOMAINS`, плюс `localhost`, `VERCEL_URL`, `SITE_HOST` |
+| `TON_PROOF_MAX_AGE_SEC` | Свежесть proof (по умолчанию 900) |
 | `REQUESTS_PER_MINUTE` | Лимит API на IP (по умолчанию 300), хранится в PostgreSQL |
 | `HOLDINGS_REQUESTS_PER_MINUTE` | Лимит `/api/wallet/holdings` (по умолчанию 60) |
 | `PORT` | Только локальный dev (по умолчанию 3002) |
 
-См. также `backend/.env.example` (TonConnect `SIGN_DATA_*`, TON API и т.д.).
+Вход: **TON Connect ton_proof** при подключении (`GET /api/auth/ton-proof-payload`, `POST /api/auth/ton-proof`). См. `backend/.env.example` (TON API, домены и т.д.).
 
 ## Продакшен
 

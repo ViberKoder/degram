@@ -1,24 +1,11 @@
-import { useMemo, useState } from 'react'
-import type { LocalWallet } from '../utils/storage'
+import { useMemo } from 'react'
 
-export default function WalletView(props: {
-  activeAddress: string
-  tonConnected: boolean
-  localWallet: LocalWallet | null
-  onDisconnectTon: () => void
-  onClearLocalWallet: () => void
-}) {
-  const [confirmClear, setConfirmClear] = useState(false)
-
-  const isLocal = props.localWallet != null && props.localWallet.address === props.activeAddress
-
+export default function WalletView(props: { activeAddress: string; onDisconnectTon: () => void }) {
   const accent = useMemo(() => {
-    if (!isLocal) return 'hsl(180 85% 55%)'
-    // stable-ish color based on address hash
     let h = 0
     for (let i = 0; i < props.activeAddress.length; i++) h = (h * 31 + props.activeAddress.charCodeAt(i)) % 360
     return `hsl(${h} 85% 55%)`
-  }, [props.activeAddress, isLocal])
+  }, [props.activeAddress])
 
   return (
     <div className="feed" style={{ padding: 12 }}>
@@ -33,56 +20,14 @@ export default function WalletView(props: {
               {props.activeAddress}
             </div>
             <div className="small muted" style={{ marginTop: 8 }}>
-              {props.tonConnected ? 'Подключено через TON Connect' : 'Локальный self-custody кошелёк'}
+              Подключено через TON Connect
             </div>
           </div>
         </div>
-        {props.tonConnected && (
-          <button className="btn danger" onClick={props.onDisconnectTon} type="button">
-            Отключить TON Connect
-          </button>
-        )}
+        <button className="btn danger" onClick={props.onDisconnectTon} type="button">
+          Отключить TON Connect
+        </button>
       </div>
-
-      {!isLocal ? (
-        <div className="mini">
-          <div style={{ fontWeight: 900, marginBottom: 6 }}>External wallet mode</div>
-          <div className="small muted">
-            Этот кошелёк подключен извне через TON Connect. Для seed-фразы нужен локальный self-custody кошелёк.
-          </div>
-        </div>
-      ) : (
-        <div style={{ display: 'grid', gap: 10 }}>
-          <div className="mini">
-            <div style={{ fontWeight: 900, marginBottom: 6 }}>Recovery phrase</div>
-            <div className="small muted" style={{ marginBottom: 10 }}>
-              Seed отображается только при создании. Для безопасности мы не храним ее на сервере и в localStorage.
-            </div>
-          </div>
-
-          <div className="mini">
-            <div style={{ fontWeight: 900, marginBottom: 6 }}>Опасные действия</div>
-            <div className="small muted" style={{ marginBottom: 10 }}>
-              Сброс удалит локальный кошелёк (адрес) из браузера. Сид (seed) в приложении не хранится, поэтому восстановить его после сброса будет нельзя. История постов, привязанных к этому адресу, останется в MVP-локальном хранилище.
-            </div>
-            {!confirmClear ? (
-              <button className="btn danger" onClick={() => setConfirmClear(true)} type="button">
-                Сбросить локальный кошелёк
-              </button>
-            ) : (
-              <div className="row">
-                <button className="btn" onClick={() => setConfirmClear(false)} type="button">
-                  Отмена
-                </button>
-                <button className="btn danger" onClick={props.onClearLocalWallet} type="button">
-                  Подтвердить сброс
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   )
 }
-

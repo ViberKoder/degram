@@ -6,13 +6,6 @@ export type Account = {
   createdAt: number
 }
 
-export type LocalWallet = {
-  address: string
-  workchain: number
-  kind: 'v4r2'
-  createdAt: number
-}
-
 export type PostReplyPreview = {
   id: string
   authorHandle: string
@@ -40,7 +33,6 @@ export type AccountStats = {
 
 const ACCOUNTS_KEY = 'degram:accounts'
 const POSTS_KEY = 'degram:posts'
-const LOCAL_WALLET_KEY = 'degram:local_wallet'
 
 function safeJsonParse<T>(value: string | null, fallback: T): T {
   if (!value) return fallback
@@ -69,51 +61,6 @@ export function loadPosts(): Post[] {
 
 export function savePosts(posts: Post[]) {
   window.localStorage.setItem(POSTS_KEY, JSON.stringify(posts))
-}
-
-export function loadLocalWallet(): LocalWallet | null {
-  if (typeof window === 'undefined') return null
-  const raw = window.localStorage.getItem(LOCAL_WALLET_KEY)
-  if (!raw) return null
-  try {
-    const parsed = JSON.parse(raw) as LocalWallet & { seedPhrase?: unknown }
-    if (
-      !parsed ||
-      typeof parsed.address !== 'string' ||
-      typeof parsed.workchain !== 'number' ||
-      parsed.kind !== 'v4r2' ||
-      typeof parsed.createdAt !== 'number'
-    ) {
-      return null
-    }
-
-    // Sanitize old localStorage entries from previous versions:
-    // we never persist seed phrase anymore.
-    const sanitized: LocalWallet = {
-      address: parsed.address,
-      workchain: parsed.workchain,
-      kind: parsed.kind,
-      createdAt: parsed.createdAt,
-    }
-    if (parsed.seedPhrase != null) {
-      window.localStorage.setItem(LOCAL_WALLET_KEY, JSON.stringify(sanitized))
-    }
-
-    return sanitized
-  } catch {
-    return null
-  }
-}
-
-export function saveLocalWallet(wallet: LocalWallet) {
-  // Persist only what we really need: address/workchain/kind.
-  // Seed phrase is intentionally not stored.
-  const { address, workchain, kind, createdAt } = wallet
-  window.localStorage.setItem(LOCAL_WALLET_KEY, JSON.stringify({ address, workchain, kind, createdAt }))
-}
-
-export function clearLocalWallet() {
-  window.localStorage.removeItem(LOCAL_WALLET_KEY)
 }
 
 export function normalizeHandle(input: string): string {

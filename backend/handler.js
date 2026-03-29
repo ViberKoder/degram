@@ -2,11 +2,9 @@ import crypto from 'node:crypto'
 import { URL } from 'node:url'
 import { query } from './db/pool.js'
 import {
-  verifyTonConnectTextSignData,
-  verifySimpleDetached,
-  addressFromPublicKeyV4,
-  addressesEqual,
-} from './auth/verifySignature.js'
+  createSignedTonProofPayload,
+  verifyTonConnectProof,
+} from './auth/verifyTonProof.js'
 
 const IS_PRODUCTION = process.env.NODE_ENV === 'production'
 
@@ -51,7 +49,6 @@ const AUTH_SECRET = loadAuthSecret()
 
 const MAX_BODY_BYTES = 128 * 1024
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000
-const CHALLENGE_TTL_MS = 5 * 60 * 1000
 const REQUESTS_PER_MINUTE = Number(process.env.REQUESTS_PER_MINUTE ?? 300)
 const HOLDINGS_REQUESTS_PER_MINUTE = Number(process.env.HOLDINGS_REQUESTS_PER_MINUTE ?? 60)
 // "Blockchain vitrine" (NFT / Jettons / DNS + USD valuation).
@@ -225,6 +222,21 @@ async function tonapiGet(pathname, params) {
   const res = await fetch(url.toString(), { headers })
   if (!res.ok) throw new Error(`tonapi_${res.status}`)
   return res.json()
+}
+
+async function fetchPublicKeyFromTonapi(address) {
+  const addr = address.trim()
+  if (!addr) return null
+  try {
+    const json = await tonapiGet(`/accounts/${encodeURIComponent(addr)}`)
+    const pk = json?.public_key ?? json?.publicKey
+    if (typeof pk === 'string' && /^[0-9a-f]{64}$/i.test(pk)) {
+      return Buffer.from(pk, 'hex')
+    }
+  } catch {
+    /* ignore */
+  }
+  return null
 }
 
 function sanitizeNanoBalance(value) {
@@ -709,17 +721,6 @@ function requireAddressAuth(req) {
   return parsed ? parsed.address : null
 }
 
-function parsePublicKeyHex(hex) {
-  try {
-    const s = String(hex ?? '').replace(/^0x/i, '').trim()
-    if (!s) return null
-    const b = Buffer.from(s, 'hex')
-    return b.length === 32 ? b : null
-  } catch {
-    return null
-  }
-}
-
 /**
  * Все мутации требуют валидный Bearer session token.
  */
@@ -762,7 +763,7 @@ export async function handleRequest(req, res) {
       return jsonResponse(res, 200, {
         ok: true,
         storage: 'postgresql',
-        version: 5,
+        version: 6,
       })
     }
 
@@ -786,82 +787,18 @@ export async function handleRequest(req, res) {
       return jsonResponse(res, 200, { ok: true })
     }
 
-    if (method === 'POST' && url.pathname === '/api/auth/challenge') {
-      const body = await readBody(req)
-      const address = (body?.address ?? '').trim()
-      if (!address) return jsonResponse(res, 400, { error: 'address_required' })
-
-      const challengeId = createId()
-      const nonce = createId()
-      const issuedAt = nowMs()
-      const expiresAt = issuedAt + CHALLENGE_TTL_MS
-      const message = `Degram auth challenge\nAddress: ${address}\nNonce: ${nonce}\nExpiresAt: ${expiresAt}`
-
-      await query(
-        `INSERT INTO auth_challenges (id, wallet_address, nonce, message, issued_at, expires_at, used_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NULL)`,
-        [challengeId, address, nonce, message, issuedAt, expiresAt],
-      )
-      return jsonResponse(res, 200, { challengeId, message, expiresAt })
+    if (method === 'GET' && url.pathname === '/api/auth/ton-proof-payload') {
+      const { payload, expiresAt } = createSignedTonProofPayload(AUTH_SECRET)
+      return jsonResponse(res, 200, { payload, expiresAt })
     }
 
-    if (method === 'POST' && url.pathname === '/api/auth/verify') {
+    if (method === 'POST' && url.pathname === '/api/auth/ton-proof') {
       const body = await readBody(req)
-      const address = (body?.address ?? '').trim()
-      const challengeId = (body?.challengeId ?? '').trim()
-      const publicKeyHex = (body?.publicKey ?? '').trim()
-      const tonConnect = body?.tonConnect
-      const simpleSignature = (body?.simpleSignature ?? '').trim()
+      const address = String(body?.address ?? '').trim()
+      if (!address) return jsonResponse(res, 400, { error: 'address_required' })
 
-      if (!address || !challengeId || !publicKeyHex) {
-        return jsonResponse(res, 400, { error: 'address_challenge_pubkey_required' })
-      }
-
-      const pk = parsePublicKeyHex(publicKeyHex)
-      if (!pk) return jsonResponse(res, 400, { error: 'invalid_public_key' })
-
-      const derivedFromPk = addressFromPublicKeyV4(pk)
-      if (!addressesEqual(derivedFromPk, address)) {
-        return jsonResponse(res, 400, { error: 'public_key_address_mismatch' })
-      }
-
-      const { rows } = await query('SELECT * FROM auth_challenges WHERE id = $1 AND wallet_address = $2', [
-        challengeId,
-        address,
-      ])
-      const challenge = rows[0]
-      if (!challenge) return jsonResponse(res, 401, { error: 'invalid_challenge' })
-      if (Number(challenge.expires_at) < nowMs()) return jsonResponse(res, 401, { error: 'challenge_expired' })
-      if (challenge.used_at != null) return jsonResponse(res, 401, { error: 'challenge_already_used' })
-
-      const message = String(challenge.message ?? '')
-      let ok = false
-
-      if (tonConnect && typeof tonConnect === 'object') {
-        if (tonConnect.payload?.type !== 'text' || tonConnect.payload?.text !== message) {
-          return jsonResponse(res, 400, { error: 'challenge_message_mismatch' })
-        }
-        if (!addressesEqual(String(tonConnect.address ?? ''), address)) {
-          return jsonResponse(res, 400, { error: 'sign_data_address_mismatch' })
-        }
-        ok = verifyTonConnectTextSignData(tonConnect, pk)
-      } else if (simpleSignature) {
-        ok = verifySimpleDetached(message, simpleSignature, pk, address)
-      } else {
-        return jsonResponse(res, 400, { error: 'ton_connect_or_simple_signature_required' })
-      }
-
-      if (!ok) {
-        return jsonResponse(res, 401, { error: 'signature_verification_failed' })
-      }
-
-      const consumed = await query(
-        `UPDATE auth_challenges SET used_at = $1 WHERE id = $2 AND used_at IS NULL RETURNING id`,
-        [nowMs(), challengeId],
-      )
-      if (!consumed.rows[0]) {
-        return jsonResponse(res, 401, { error: 'challenge_already_used' })
-      }
+      const ok = await verifyTonConnectProof(body, AUTH_SECRET, fetchPublicKeyFromTonapi)
+      if (!ok) return jsonResponse(res, 401, { error: 'ton_proof_invalid' })
 
       const token = createSessionToken(address)
       const expiresAt = nowMs() + SESSION_TTL_MS

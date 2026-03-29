@@ -1,23 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   TonConnectButton,
   TonConnectUIProvider,
   useTonAddress,
   useTonConnectUI,
 } from '@tonconnect/ui-react'
-import {
-  Account,
-  AccountStats,
-  LocalWallet,
-  Post,
-  hashToHsl,
-  isValidHandle,
-  loadLocalWallet,
-  clearLocalWallet,
-  normalizeHandle,
-} from './utils/storage'
+import { Account, AccountStats, Post, hashToHsl, isValidHandle, normalizeHandle } from './utils/storage'
 import './styles/index.css'
-import CreateWalletModal from './components/CreateWalletModal'
 import WalletView from './components/WalletView'
 import PostCard from './components/PostCard'
 import WalletHoldingsCard from './components/WalletHoldingsCard'
@@ -32,12 +21,12 @@ import {
   getHomeFeed,
   getPostsByAddress,
   getRecommended,
+  getTonProofPayload,
   likePost,
-  requestAuthChallenge,
+  submitTonProof,
   unlikePost,
   unfollow,
   upsertAccount,
-  verifyAuthSession,
 } from './services/degramApi'
 import {
   clearSession,
@@ -45,7 +34,7 @@ import {
   saveSession,
   sessionMatchesAddress,
 } from './utils/sessionAuth'
-import LocalWalletSignInModal from './components/LocalWalletSignInModal'
+import { extractTonProof } from './utils/tonConnectProof'
 
 function formatAddress(addr: string) {
   if (!addr) return ''
@@ -64,6 +53,7 @@ function nowTimeLabel(ts: number) {
 function InnerApp() {
   const tonAddress = useTonAddress(true)
   const [tonConnectUI] = useTonConnectUI()
+  const tonProofSubmitLock = useRef(false)
 
   const [activeAccount, setActiveAccount] = useState<Account | null>(null)
   const [posts, setPosts] = useState<Post[]>([])
@@ -75,7 +65,6 @@ function InnerApp() {
   const [recommended, setRecommended] = useState<Array<{ handle: string; count: number }>>([])
   const [accountLoaded, setAccountLoaded] = useState(false)
   const [view, setView] = useState<'feed' | 'profile' | 'user' | 'wallet'>('feed')
-  const [localWallet, setLocalWallet] = useState<LocalWallet | null>(() => loadLocalWallet())
 
   const [myProfilePosts, setMyProfilePosts] = useState<Post[]>([])
   const [viewingUserHandle, setViewingUserHandle] = useState<string | null>(null)
@@ -89,73 +78,101 @@ function InnerApp() {
   const [replyingTo, setReplyingTo] = useState<Post | null>(null)
   const [likeBusyId, setLikeBusyId] = useState<string | null>(null)
 
-  const [showCreateWalletModal, setShowCreateWalletModal] = useState(false)
-
   const [autoRegistering, setAutoRegistering] = useState(false)
   const [autoRegisterError, setAutoRegisterError] = useState<string | null>(null)
 
   const [authVersion, setAuthVersion] = useState(0)
   const [authBusy, setAuthBusy] = useState(false)
   const [authError, setAuthError] = useState<string | null>(null)
-  const [localSignIn, setLocalSignIn] = useState<{ challengeId: string; message: string } | null>(null)
 
   const tonConnected = tonAddress.trim().length > 0
-  const activeAddress = tonConnected ? tonAddress : localWallet?.address ?? ''
+  const activeAddress = tonAddress.trim()
 
   const authReady = useMemo(() => {
     void authVersion
     return sessionMatchesAddress(activeAddress)
   }, [activeAddress, authVersion])
 
-  const getTonPublicKeyHex = useCallback((): string | null => {
-    const acc = tonConnectUI.wallet?.account
-    if (!acc?.publicKey) return null
-    const pk = acc.publicKey as string | Uint8Array
-    if (typeof pk === 'string') return pk.replace(/^0x/i, '').trim()
-    return Buffer.from(pk).toString('hex')
+  useEffect(() => {
+    let cancelled = false
+    async function refreshPayload() {
+      try {
+        const { payload } = await getTonProofPayload()
+        if (cancelled) return
+        tonConnectUI.setConnectRequestParameters({
+          state: 'ready',
+          value: { tonProof: payload },
+        })
+      } catch {
+        if (!cancelled) tonConnectUI.setConnectRequestParameters(null)
+      }
+    }
+    void refreshPayload()
+    const interval = setInterval(refreshPayload, 10 * 60 * 1000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
   }, [tonConnectUI])
 
-  const signInWithTonConnect = useCallback(async () => {
-    if (!activeAddress || !tonConnected) return
-    setAuthBusy(true)
-    setAuthError(null)
-    try {
-      const ch = await requestAuthChallenge(activeAddress)
-      const pkHex = getTonPublicKeyHex()
-      if (!pkHex) throw new Error('Не удалось получить public key из кошелька. Обновите кошелёк / Ton Connect.')
-      const signData = await (tonConnectUI as { signData?: (p: { type: string; text: string }) => Promise<unknown> }).signData?.({
-        type: 'text',
-        text: ch.message,
-      })
-      if (!signData) throw new Error('Кошелёк не поддерживает SignData — обновите Tonkeeper / другой кошелёк.')
-      const { token, expiresAt } = await verifyAuthSession({
-        address: activeAddress,
-        challengeId: ch.challengeId,
-        publicKey: pkHex,
-        tonConnect: signData,
-      })
-      saveSession({ address: activeAddress, token, expiresAt })
-      setAuthVersion((v) => v + 1)
-    } catch (e) {
-      setAuthError((e as Error).message || 'Не удалось войти')
-    } finally {
-      setAuthBusy(false)
-    }
-  }, [activeAddress, tonConnected, tonConnectUI, getTonPublicKeyHex])
+  useEffect(() => {
+    return tonConnectUI.onStatusChange((wallet) => {
+      if (!wallet?.account?.address) {
+        setAuthError(null)
+        return
+      }
+      const addr = wallet.account.address
+      if (sessionMatchesAddress(addr)) {
+        setAuthError(null)
+        return
+      }
+      const proof = extractTonProof(wallet.account)
+      if (!proof) return
 
-  const startLocalSignIn = useCallback(async () => {
-    if (!activeAddress) return
-    setAuthBusy(true)
-    setAuthError(null)
-    try {
-      const ch = await requestAuthChallenge(activeAddress)
-      setLocalSignIn({ challengeId: ch.challengeId, message: ch.message })
-    } catch (e) {
-      setAuthError((e as Error).message || 'Не удалось получить challenge')
-    } finally {
-      setAuthBusy(false)
-    }
-  }, [activeAddress])
+      const pkRaw = wallet.account.publicKey
+      let publicKeyHex: string
+      if (typeof pkRaw === 'string') publicKeyHex = pkRaw.replace(/^0x/i, '').trim()
+      else if (pkRaw instanceof Uint8Array) publicKeyHex = Buffer.from(pkRaw).toString('hex')
+      else return
+      if (publicKeyHex.length !== 64) return
+
+      if (tonProofSubmitLock.current) return
+      tonProofSubmitLock.current = true
+
+      setAuthBusy(true)
+      setAuthError(null)
+      void (async () => {
+        try {
+          const { token, expiresAt } = await submitTonProof({
+            address: addr,
+            public_key: publicKeyHex,
+            proof,
+          })
+          saveSession({ address: addr, token, expiresAt })
+          setAuthVersion((v) => v + 1)
+          setAuthError(null)
+        } catch (e) {
+          const msg = (e as Error).message || 'ton_proof_invalid'
+          setAuthError(msg === 'ton_proof_invalid' ? 'Не удалось подтвердить кошелёк. Отключите и подключите снова.' : msg)
+        } finally {
+          setAuthBusy(false)
+          tonProofSubmitLock.current = false
+        }
+      })()
+    })
+  }, [tonConnectUI])
+
+  useEffect(() => {
+    void tonConnectUI.connectionRestored.then((ok) => {
+      if (!ok) return
+      const w = tonConnectUI.wallet
+      if (!w?.account?.address) return
+      if (sessionMatchesAddress(w.account.address)) return
+      if (!extractTonProof(w.account)) {
+        setAuthError('Сессия сброшена. Нажмите «Выйти» и подключите кошелёк ещё раз.')
+      }
+    })
+  }, [tonConnectUI])
 
   useEffect(() => {
     if (!activeAddress) return
@@ -165,10 +182,6 @@ function InnerApp() {
       setAuthVersion((v) => v + 1)
     }
   }, [activeAddress])
-
-  useEffect(() => {
-    setLocalWallet(loadLocalWallet())
-  }, [])
 
   useEffect(() => {
     if (!activeAddress) {
@@ -306,20 +319,11 @@ function InnerApp() {
     await tonConnectUI.disconnect()
   }
 
-  const handleClearLocalWallet = () => {
-    clearLocalWallet()
-    setLocalWallet(null)
-    setView('feed')
-  }
-
   const handleAuthDisconnect = async () => {
     clearSession()
     setAuthVersion((v) => v + 1)
-    if (tonConnected) {
-      await handleDisconnectTon()
-    } else {
-      handleClearLocalWallet()
-    }
+    setAuthError(null)
+    await handleDisconnectTon()
   }
 
   const patchPostEverywhere = useCallback((postId: string, patch: Partial<Post>) => {
@@ -409,7 +413,7 @@ function InnerApp() {
   const autoRegisterNow = async () => {
     if (!activeAddress) return
     if (!sessionMatchesAddress(activeAddress)) {
-      setAutoRegisterError('Сначала войдите: подпишите challenge для этого адреса.')
+      setAutoRegisterError('Сначала войдите через TON Connect (подтверждение в кошельке при подключении).')
       return
     }
     setAutoRegisterError(null)
@@ -461,7 +465,7 @@ function InnerApp() {
   const submitRegistration = () => {
     if (!activeAddress) return
     if (!authReady) {
-      setRegError('Сначала войдите (подпись challenge).')
+      setRegError('Сначала войдите через TON Connect.')
       return
     }
     setRegError(null)
@@ -585,29 +589,14 @@ function InnerApp() {
           <div className="panel" style={{ padding: 20 }}>
             <div className="auth-title">Добро пожаловать в Degram</div>
             <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
-              TON/Telegram social layer: подключи кошелёк через <span className="mono">TON Connect</span> или создай
-              self-custody wallet, чтобы сразу войти в ленту.
+              Подключи кошелёк через <span className="mono">TON Connect</span>. Подтверждение запрашивается один раз при
+              подключении (без отдельной подписи и без seed phrase на сайте).
             </div>
-            <div style={{ marginTop: 20, display: 'grid', gap: 12 }}>
-              <div style={{ display: 'flex', justifyContent: 'center' }}>
-                <TonConnectButton />
-              </div>
-              <button
-                className="btn primary"
-                onClick={() => setShowCreateWalletModal(true)}
-                type="button"
-              >
-                Создать новый кошелёк (self-custody)
-              </button>
+            <div style={{ marginTop: 20, display: 'flex', justifyContent: 'center' }}>
+              <TonConnectButton />
             </div>
           </div>
         </div>
-        {showCreateWalletModal && (
-          <CreateWalletModal
-            onClose={() => setShowCreateWalletModal(false)}
-            onCreated={() => setLocalWallet(loadLocalWallet())}
-          />
-        )}
       </div>
     )
   }
@@ -632,51 +621,21 @@ function InnerApp() {
       return (
         <div className="container">
           <div className="panel" style={{ marginTop: 20, padding: 20 }}>
-            <div className="auth-title">Подтвердите кошелёк</div>
+            <div className="auth-title">Вход через TON Connect</div>
             <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
-              Подпишите одноразовое сообщение в кошельке (без перевода TON). После этого мы создадим профиль.
+              {authBusy
+                ? 'Подтвердите запрос в кошельке (это часть подключения, без перевода TON).'
+                : authError
+                  ? authError
+                  : 'Завершите подключение кошелька. Если окно кошелька не появилось, отключитесь и подключите снова.'}
             </div>
-            {authError && <div className="error" style={{ marginTop: 12 }}>{authError}</div>}
-            <div style={{ marginTop: 16, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-              {tonConnected && (
-                <button
-                  type="button"
-                  className="btn primary"
-                  disabled={authBusy}
-                  onClick={() => void signInWithTonConnect()}
-                >
-                  {authBusy ? '…' : 'Подписать через TON Connect'}
-                </button>
-              )}
-              {!tonConnected && localWallet && (
-                <button
-                  type="button"
-                  className="btn primary"
-                  disabled={authBusy}
-                  onClick={() => void startLocalSignIn()}
-                >
-                  {authBusy ? '…' : 'Войти по seed phrase'}
-                </button>
-              )}
-            </div>
-            <div style={{ marginTop: 14 }} className="muted small">
-              Нужен кошелёк с поддержкой SignData (актуальный Tonkeeper и др.).
-            </div>
+            {authError && !authBusy && <div className="error" style={{ marginTop: 12 }}>{authError}</div>}
             <div className="row" style={{ marginTop: 16 }}>
-              <button className="btn danger" onClick={handleAuthDisconnect} type="button">
-                Отключить
+              <button className="btn danger" onClick={() => void handleAuthDisconnect()} type="button">
+                Выйти / отключить кошелёк
               </button>
             </div>
           </div>
-          {localSignIn && (
-            <LocalWalletSignInModal
-              address={activeAddress}
-              challengeId={localSignIn.challengeId}
-              message={localSignIn.message}
-              onClose={() => setLocalSignIn(null)}
-              onSuccess={() => setAuthVersion((v) => v + 1)}
-            />
-          )}
         </div>
       )
     }
@@ -769,19 +728,13 @@ function InnerApp() {
               type="button"
             >
               <span>Wallet</span>
-              <span className="muted mono">{tonConnected ? 'TON' : 'local'}</span>
+              <span className="muted mono">TON</span>
             </button>
           </aside>
 
           <main className="panel main">
             {view === 'wallet' ? (
-              <WalletView
-                activeAddress={activeAddress}
-                tonConnected={tonConnected}
-                localWallet={localWallet}
-                onDisconnectTon={handleDisconnectTon}
-                onClearLocalWallet={handleClearLocalWallet}
-              />
+              <WalletView activeAddress={activeAddress} onDisconnectTon={handleDisconnectTon} />
             ) : view === 'profile' ? (
               <div className="feed">
                 <div className="profile-hero">
@@ -905,32 +858,17 @@ function InnerApp() {
               <>
                 {activeAccount && !authReady && (
                   <div className="panel" style={{ padding: 16, marginBottom: 12 }}>
-                    <div style={{ fontWeight: 800 }}>Вход в API</div>
+                    <div style={{ fontWeight: 800 }}>Вход в приложение</div>
                     <div className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
-                      Подпишите challenge, чтобы публиковать посты, лайкать и подписываться.
+                      {authBusy
+                        ? 'Подтвердите запрос в кошельке…'
+                        : authError || 'Подключите кошелёк заново или подтвердите запрос в кошельке.'}
                     </div>
-                    {authError && <div className="error" style={{ marginTop: 8 }}>{authError}</div>}
-                    <div style={{ marginTop: 12, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                      {tonConnected && (
-                        <button
-                          type="button"
-                          className="btn primary"
-                          disabled={authBusy}
-                          onClick={() => void signInWithTonConnect()}
-                        >
-                          {authBusy ? '…' : 'Подписать (TON Connect)'}
-                        </button>
-                      )}
-                      {!tonConnected && localWallet && (
-                        <button
-                          type="button"
-                          className="btn primary"
-                          disabled={authBusy}
-                          onClick={() => void startLocalSignIn()}
-                        >
-                          {authBusy ? '…' : 'Войти по seed'}
-                        </button>
-                      )}
+                    {authError && !authBusy && <div className="error" style={{ marginTop: 8 }}>{authError}</div>}
+                    <div style={{ marginTop: 12 }}>
+                      <button type="button" className="btn danger" onClick={() => void handleAuthDisconnect()}>
+                        Выйти из кошелька
+                      </button>
                     </div>
                   </div>
                 )}
@@ -1083,15 +1021,6 @@ function InnerApp() {
           </aside>
         </div>
       </div>
-      {localSignIn && activeAccount && (
-        <LocalWalletSignInModal
-          address={activeAddress}
-          challengeId={localSignIn.challengeId}
-          message={localSignIn.message}
-          onClose={() => setLocalSignIn(null)}
-          onSuccess={() => setAuthVersion((v) => v + 1)}
-        />
-      )}
     </div>
   )
 }
