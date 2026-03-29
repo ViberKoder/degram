@@ -41,12 +41,23 @@ export function createTextSignDataHash(payload, parsedAddr, domain, timestamp) {
 }
 
 function parseAllowedDomains() {
-  const raw =
-    process.env.SIGN_DATA_ALLOWED_DOMAINS ?? 'localhost,127.0.0.1'
-  return raw
+  const fromEnv = (process.env.SIGN_DATA_ALLOWED_DOMAINS ?? '')
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean)
+
+  const defaults = ['localhost', '127.0.0.1']
+  const vercel = (process.env.VERCEL_URL ?? '').replace(/^https?:\/\//i, '').trim().toLowerCase()
+  if (vercel) defaults.push(vercel)
+
+  const site = (process.env.SITE_HOST ?? process.env.PUBLIC_SITE_HOST ?? '')
+    .replace(/^https?:\/\//i, '')
+    .trim()
+    .toLowerCase()
+  if (site) defaults.push(site)
+
+  const merged = [...new Set([...fromEnv, ...defaults])]
+  return merged
 }
 
 function domainAllowed(domain) {

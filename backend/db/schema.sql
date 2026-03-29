@@ -64,3 +64,12 @@ CREATE TABLE IF NOT EXISTS likes (
 );
 CREATE INDEX IF NOT EXISTS idx_likes_post ON likes(post_id);
 CREATE INDEX IF NOT EXISTS idx_likes_wallet ON likes(wallet_address);
+
+-- Distributed rate limiting (serverless-safe): one row per bucket per wall-clock minute
+CREATE TABLE IF NOT EXISTS rate_limits (
+  bucket_key TEXT NOT NULL,
+  minute_epoch BIGINT NOT NULL,
+  hits INT NOT NULL,
+  PRIMARY KEY (bucket_key, minute_epoch)
+);
+CREATE INDEX IF NOT EXISTS idx_rate_limits_minute ON rate_limits(minute_epoch);

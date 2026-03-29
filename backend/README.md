@@ -28,8 +28,11 @@ API: `http://localhost:3002` (порт `PORT`).
 | `POSTGRES_URL_NON_POOLING` | Опциональный fallback |
 | `DATABASE_URL` | Альтернативное имя для строки подключения |
 | `PG_SSL_REJECT_UNAUTHORIZED` | По умолчанию `false` для managed Postgres; `true` если цепочка сертификата доверена в рантайме |
-| `AUTH_SECRET` | Секрет для сессионных токенов |
-| `CORS_ORIGIN` | Например `*` или URL фронта |
+| `AUTH_SECRET` | Секрет для сессионных токенов: в **production** обязателен, **≥ 32 символов** |
+| `CORS_ORIGIN` | Один URL или несколько через запятую. В production без значения на Vercel подставляется `https://$VERCEL_URL` |
+| `SITE_HOST` | Без схемы, для TonConnect SignData вместе с `SIGN_DATA_ALLOWED_DOMAINS` |
+| `REQUESTS_PER_MINUTE` | Лимит API на IP (по умолчанию 300), хранится в PostgreSQL |
+| `HOLDINGS_REQUESTS_PER_MINUTE` | Лимит `/api/wallet/holdings` (по умолчанию 60) |
 | `PORT` | Только локальный dev (по умолчанию 3002) |
 
 См. также `backend/.env.example` (TonConnect `SIGN_DATA_*`, TON API и т.д.).

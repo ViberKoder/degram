@@ -8,12 +8,52 @@ import {
   addressesEqual,
 } from './auth/verifySignature.js'
 
+const IS_PRODUCTION = process.env.NODE_ENV === 'production'
+
+function loadAuthSecret() {
+  const raw = (process.env.AUTH_SECRET ?? '').trim()
+  if (raw.length >= 32) return raw
+  if (IS_PRODUCTION) {
+    throw new Error(
+      'AUTH_SECRET must be set to a strong value (at least 32 characters) in production',
+    )
+  }
+  if (raw.length > 0 && raw.length < 32) {
+    console.warn('[degram] AUTH_SECRET is shorter than 32 characters; use a longer secret in production')
+    return raw
+  }
+  console.warn(
+    '[degram] AUTH_SECRET not set; using a fixed local-dev secret (set AUTH_SECRET in .env for stable sessions)',
+  )
+  return 'degram-local-dev-only-secret-min-32-chars!!'
+}
+
+function getCorsAllowOrigin(req) {
+  const raw = (process.env.CORS_ORIGIN ?? '').trim()
+  if (raw) {
+    const parts = raw.split(',').map((s) => s.trim()).filter(Boolean)
+    if (parts.length === 1) return parts[0]
+    const origin = req.headers.origin
+    if (typeof origin === 'string' && parts.includes(origin)) return origin
+    return parts[0]
+  }
+  if (IS_PRODUCTION) {
+    const v = (process.env.VERCEL_URL ?? '').replace(/^https?:\/\//i, '').trim()
+    if (v) return `https://${v}`
+    throw new Error(
+      'CORS_ORIGIN must be set in production when VERCEL_URL is missing (e.g. https://your-domain.com)',
+    )
+  }
+  return '*'
+}
+
+const AUTH_SECRET = loadAuthSecret()
+
 const MAX_BODY_BYTES = 128 * 1024
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000
 const CHALLENGE_TTL_MS = 5 * 60 * 1000
-const REQUESTS_PER_MINUTE = 300
-const AUTH_SECRET = process.env.AUTH_SECRET ?? 'degram-dev-secret-change-me'
-const CORS_ORIGIN = process.env.CORS_ORIGIN ?? '*'
+const REQUESTS_PER_MINUTE = Number(process.env.REQUESTS_PER_MINUTE ?? 300)
+const HOLDINGS_REQUESTS_PER_MINUTE = Number(process.env.HOLDINGS_REQUESTS_PER_MINUTE ?? 60)
 // "Blockchain vitrine" (NFT / Jettons / DNS + USD valuation).
 // These calls are read-only and executed on demand.
 const TONCENTER_API_KEY = process.env.TONCENTER_API_KEY ?? ''
@@ -29,8 +69,6 @@ const DYOR_API_KEY = process.env.DYOR_API_KEY ?? ''
 const HOLDINGS_NFT_LIMIT = Number(process.env.HOLDINGS_NFT_LIMIT ?? 12)
 const HOLDINGS_JETTON_LIMIT = Number(process.env.HOLDINGS_JETTON_LIMIT ?? 10)
 const HOLDINGS_DNS_LIMIT = Number(process.env.HOLDINGS_DNS_LIMIT ?? 12)
-
-const rateLimitBuckets = new Map()
 
 function nowMs() {
   return Date.now()
@@ -66,13 +104,24 @@ function decodeCursor(cursor) {
   }
 }
 
+function securityHeaders() {
+  return {
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  }
+}
+
 function jsonResponse(res, status, body) {
   const payload = JSON.stringify(body ?? {})
+  const allowOrigin = res.degramCorsOrigin ?? '*'
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': CORS_ORIGIN,
+    ...securityHeaders(),
+    'Access-Control-Allow-Origin': allowOrigin,
     'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+    'Access-Control-Max-Age': '86400',
   })
   res.end(payload)
 }
@@ -83,18 +132,33 @@ function getIp(req) {
   return req.socket?.remoteAddress ?? 'unknown'
 }
 
-function checkRateLimit(ip) {
+/**
+ * PostgreSQL-backed rate limit (works across serverless instances).
+ * @param {'global' | 'holdings'} kind
+ */
+async function checkRateLimit(ip, kind = 'global') {
+  const max = kind === 'holdings' ? HOLDINGS_REQUESTS_PER_MINUTE : REQUESTS_PER_MINUTE
   const minute = Math.floor(nowMs() / 60_000)
-  const key = `${ip}:${minute}`
-  const value = rateLimitBuckets.get(key) ?? 0
-  if (value >= REQUESTS_PER_MINUTE) return false
-  rateLimitBuckets.set(key, value + 1)
-  if (rateLimitBuckets.size > 5000) {
-    for (const bucketKey of rateLimitBuckets.keys()) {
-      if (!bucketKey.endsWith(`:${minute}`)) rateLimitBuckets.delete(bucketKey)
+  const safeIp = String(ip ?? 'unknown').slice(0, 256)
+  const bucketKey = `${kind}:${safeIp}`
+  try {
+    const { rows } = await query(
+      `INSERT INTO rate_limits (bucket_key, minute_epoch, hits)
+       VALUES ($1, $2, 1)
+       ON CONFLICT (bucket_key, minute_epoch)
+       DO UPDATE SET hits = rate_limits.hits + 1
+       RETURNING hits`,
+      [bucketKey, minute],
+    )
+    const hits = Number(rows[0]?.hits ?? 0)
+    if (Math.random() < 0.02) {
+      await query(`DELETE FROM rate_limits WHERE minute_epoch < $1`, [minute - 15]).catch(() => {})
     }
+    return hits <= max
+  } catch (e) {
+    console.error('rate_limit_error', e)
+    return true
   }
-  return true
 }
 
 function toNumberSafe(value, fallback = 0) {
@@ -681,8 +745,10 @@ async function maybeCleanupAuth() {
  */
 export async function handleRequest(req, res) {
   try {
+    res.degramCorsOrigin = getCorsAllowOrigin(req)
+
     const ip = getIp(req)
-    if (!checkRateLimit(ip)) return jsonResponse(res, 429, { error: 'rate_limited' })
+    if (!(await checkRateLimit(ip, 'global'))) return jsonResponse(res, 429, { error: 'rate_limited' })
 
     const host = req.headers.host ?? 'localhost'
     const url = new URL(req.url ?? '/', `http://${host}`)
@@ -701,6 +767,9 @@ export async function handleRequest(req, res) {
     }
 
     if (method === 'GET' && url.pathname === '/api/wallet/holdings') {
+      if (!(await checkRateLimit(ip, 'holdings'))) {
+        return jsonResponse(res, 429, { error: 'rate_limited_holdings' })
+      }
       const address = (url.searchParams.get('address') ?? '').trim()
       if (!address) return jsonResponse(res, 400, { error: 'address_required' })
       try {
@@ -786,7 +855,13 @@ export async function handleRequest(req, res) {
         return jsonResponse(res, 401, { error: 'signature_verification_failed' })
       }
 
-      await query('UPDATE auth_challenges SET used_at = $1 WHERE id = $2', [nowMs(), challengeId])
+      const consumed = await query(
+        `UPDATE auth_challenges SET used_at = $1 WHERE id = $2 AND used_at IS NULL RETURNING id`,
+        [nowMs(), challengeId],
+      )
+      if (!consumed.rows[0]) {
+        return jsonResponse(res, 401, { error: 'challenge_already_used' })
+      }
 
       const token = createSessionToken(address)
       const expiresAt = nowMs() + SESSION_TTL_MS

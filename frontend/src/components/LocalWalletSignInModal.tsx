@@ -14,9 +14,14 @@ export default function LocalWalletSignInModal(props: {
   const [mnemonic, setMnemonic] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [riskAccepted, setRiskAccepted] = useState(false)
 
   const submit = async () => {
     setError(null)
+    if (!riskAccepted) {
+      setError('Подтвердите, что понимаете риски, чтобы продолжить.')
+      return
+    }
     setBusy(true)
     try {
       const words = mnemonic.trim().split(/\s+/).filter(Boolean)
@@ -36,12 +41,14 @@ export default function LocalWalletSignInModal(props: {
         simpleSignature,
       })
       saveSession({ address: props.address, token, expiresAt })
+      setMnemonic('')
       props.onSuccess()
       props.onClose()
     } catch (e) {
       setError((e as Error).message || 'Не удалось войти')
     } finally {
       setBusy(false)
+      setMnemonic('')
     }
   }
 
@@ -56,10 +63,20 @@ export default function LocalWalletSignInModal(props: {
         </div>
         <div className="modalBody">
           <div style={{ display: 'grid', gap: 12 }}>
-            <div className="small">
-              Фраза используется только в браузере для одной подписи и не сохраняется. Убедись, что никто не видит
-              экран.
+            <div className="small" style={{ lineHeight: 1.5 }}>
+              <strong>Важно.</strong> Ввод seed phrase в любом сайте несёт риск кражи средств (фишинг, вредоносные
+              расширения, XSS). Предпочтительно войти через TonConnect (кошелёк подписывает сообщение сам). Используйте
+              seed только если понимаете риск и доверяете этому домену.
             </div>
+            <label className="small" style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={riskAccepted}
+                onChange={(e) => setRiskAccepted(e.target.checked)}
+                style={{ marginTop: 3 }}
+              />
+              <span>Я понимаю риски и ввожу seed только на официальном сайте Degram.</span>
+            </label>
             {error && <div className="error">{error}</div>}
             <textarea
               className="mono"
@@ -68,6 +85,9 @@ export default function LocalWalletSignInModal(props: {
               value={mnemonic}
               onChange={(e) => setMnemonic(e.target.value)}
               autoComplete="off"
+              spellCheck={false}
+              data-lpignore="true"
+              data-1p-ignore="true"
             />
             <div className="row">
               <button className="btn" onClick={props.onClose} type="button">
