@@ -107,6 +107,36 @@ function decodeCursor(cursor) {
   }
 }
 
+/** First path segment for all DeGram JSON API routes (handler matches /api/...). */
+const API_PATH_FIRST_SEGMENTS = new Set([
+  'health',
+  'ready',
+  'wallet',
+  'auth',
+  'accounts',
+  'posts',
+  'feed',
+  'follows',
+  'likes',
+  'recommended',
+])
+
+/**
+ * Vercel serverless catch-all sometimes provides a pathname without the /api prefix.
+ * Collapse slashes and strip trailing slash so route checks stay stable.
+ */
+function normalizeRequestPathname(raw) {
+  let p = typeof raw === 'string' && raw.length > 0 ? raw : '/'
+  p = p.replace(/\/{2,}/g, '/')
+  if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1)
+  if (p.startsWith('/api')) return p
+  const first = p.replace(/^\//, '').split('/')[0] ?? ''
+  if (first && API_PATH_FIRST_SEGMENTS.has(first)) {
+    return p.startsWith('/') ? `/api${p}` : `/api/${p}`
+  }
+  return p
+}
+
 function securityHeaders() {
   return {
     'X-Content-Type-Options': 'nosniff',
@@ -770,13 +800,14 @@ export async function handleRequest(req, res) {
 
     const host = req.headers.host ?? 'localhost'
     const url = new URL(req.url ?? '/', `http://${host}`)
+    const pathname = normalizeRequestPathname(url.pathname)
     const method = req.method ?? 'GET'
 
     if (method === 'OPTIONS') return jsonResponse(res, 204, {})
 
     await maybeCleanupAuth()
 
-    if (method === 'GET' && url.pathname === '/api/health') {
+    if (method === 'GET' && pathname === '/api/health') {
       return jsonResponse(res, 200, {
         ok: true,
         storage: 'postgresql',
@@ -784,7 +815,7 @@ export async function handleRequest(req, res) {
       })
     }
 
-    if (method === 'GET' && url.pathname === '/api/wallet/holdings') {
+    if (method === 'GET' && pathname === '/api/wallet/holdings') {
       if (!(await checkRateLimit(ip, 'holdings'))) {
         return jsonResponse(res, 429, { error: 'rate_limited_holdings' })
       }
@@ -799,17 +830,17 @@ export async function handleRequest(req, res) {
       }
     }
 
-    if (method === 'GET' && url.pathname === '/api/ready') {
+    if (method === 'GET' && pathname === '/api/ready') {
       await query('SELECT 1 AS ok')
       return jsonResponse(res, 200, { ok: true })
     }
 
-    if (method === 'GET' && url.pathname === '/api/auth/ton-proof-payload') {
+    if (method === 'GET' && pathname === '/api/auth/ton-proof-payload') {
       const { payload, expiresAt } = createSignedTonProofPayload(AUTH_SECRET)
       return jsonResponse(res, 200, { payload, expiresAt })
     }
 
-    if (method === 'POST' && url.pathname === '/api/auth/ton-proof') {
+    if (method === 'POST' && pathname === '/api/auth/ton-proof') {
       const body = await readBody(req)
       const address = String(body?.address ?? '').trim()
       if (!address) return jsonResponse(res, 400, { error: 'address_required' })
@@ -828,7 +859,7 @@ export async function handleRequest(req, res) {
       return jsonResponse(res, 200, { token, expiresAt })
     }
 
-    if (method === 'POST' && url.pathname === '/api/auth/challenge') {
+    if (method === 'POST' && pathname === '/api/auth/challenge') {
       const body = await readBody(req)
       const address = (body?.address ?? '').trim()
       if (!address) return jsonResponse(res, 400, { error: 'address_required' })
@@ -847,7 +878,7 @@ export async function handleRequest(req, res) {
       return jsonResponse(res, 200, { challengeId, message, expiresAt })
     }
 
-    if (method === 'POST' && url.pathname === '/api/auth/verify') {
+    if (method === 'POST' && pathname === '/api/auth/verify') {
       const body = await readBody(req)
       const address = (body?.address ?? '').trim()
       const challengeId = (body?.challengeId ?? '').trim()
@@ -904,25 +935,25 @@ export async function handleRequest(req, res) {
       return jsonResponse(res, 200, { token, expiresAt })
     }
 
-    if (method === 'GET' && url.pathname === '/api/accounts/by-address') {
+    if (method === 'GET' && pathname === '/api/accounts/by-address') {
       const address = (url.searchParams.get('address') ?? '').trim()
       if (!address) return jsonResponse(res, 400, { error: 'address_required' })
       return jsonResponse(res, 200, { account: await findAccountByAddress(address) })
     }
 
-    if (method === 'GET' && url.pathname === '/api/accounts/by-handle') {
+    if (method === 'GET' && pathname === '/api/accounts/by-handle') {
       const handle = normalizeHandle(url.searchParams.get('handle') ?? '')
       if (!handle) return jsonResponse(res, 400, { error: 'handle_required' })
       return jsonResponse(res, 200, { account: await findAccountByHandle(handle) })
     }
 
-    if (method === 'GET' && url.pathname === '/api/accounts/stats') {
+    if (method === 'GET' && pathname === '/api/accounts/stats') {
       const address = (url.searchParams.get('address') ?? '').trim()
       if (!address) return jsonResponse(res, 400, { error: 'address_required' })
       return jsonResponse(res, 200, { stats: await getAccountStats(address) })
     }
 
-    if (method === 'GET' && url.pathname === '/api/follows/status') {
+    if (method === 'GET' && pathname === '/api/follows/status') {
       const follower = (url.searchParams.get('follower') ?? '').trim()
       const followee = (url.searchParams.get('followee') ?? '').trim()
       if (!follower || !followee) return jsonResponse(res, 400, { error: 'follower_followee_required' })
@@ -933,7 +964,7 @@ export async function handleRequest(req, res) {
       return jsonResponse(res, 200, { following: Boolean(rows[0]) })
     }
 
-    if (method === 'GET' && url.pathname === '/api/posts/by-id') {
+    if (method === 'GET' && pathname === '/api/posts/by-id') {
       const id = (url.searchParams.get('id') ?? '').trim()
       const viewer = (url.searchParams.get('viewer') ?? '').trim()
       if (!id) return jsonResponse(res, 400, { error: 'id_required' })
@@ -943,7 +974,7 @@ export async function handleRequest(req, res) {
       return jsonResponse(res, 200, { post: enriched[0] })
     }
 
-    if (method === 'POST' && url.pathname === '/api/accounts') {
+    if (method === 'POST' && pathname === '/api/accounts') {
       const body = await readBody(req)
       const authAddress = requireBearerAuth(req, res)
       if (!authAddress) return
@@ -983,7 +1014,7 @@ export async function handleRequest(req, res) {
       return jsonResponse(res, 201, { account: next })
     }
 
-    if (method === 'GET' && url.pathname === '/api/posts') {
+    if (method === 'GET' && pathname === '/api/posts') {
       const limit = parsePositiveInt(url.searchParams.get('limit') ?? '20', 20, 100)
       const cursor = url.searchParams.get('cursor')
       const offsetParam = url.searchParams.get('offset')
@@ -1033,7 +1064,7 @@ export async function handleRequest(req, res) {
       })
     }
 
-    if (method === 'GET' && url.pathname === '/api/posts/by-address') {
+    if (method === 'GET' && pathname === '/api/posts/by-address') {
       const address = (url.searchParams.get('address') ?? '').trim()
       const limit = parsePositiveInt(url.searchParams.get('limit') ?? '20', 20, 100)
       const cursor = url.searchParams.get('cursor')
@@ -1092,7 +1123,7 @@ export async function handleRequest(req, res) {
       })
     }
 
-    if (method === 'POST' && url.pathname === '/api/posts') {
+    if (method === 'POST' && pathname === '/api/posts') {
       const body = await readBody(req)
       const authAddress = requireBearerAuth(req, res)
       if (!authAddress) return
@@ -1132,7 +1163,7 @@ export async function handleRequest(req, res) {
       return jsonResponse(res, 201, { post: enriched })
     }
 
-    if (method === 'GET' && url.pathname === '/api/feed/home') {
+    if (method === 'GET' && pathname === '/api/feed/home') {
       const address = (url.searchParams.get('address') ?? '').trim()
       const limit = parsePositiveInt(url.searchParams.get('limit') ?? '20', 20, 100)
       const cursor = url.searchParams.get('cursor')
@@ -1180,7 +1211,7 @@ export async function handleRequest(req, res) {
       })
     }
 
-    if (method === 'POST' && url.pathname === '/api/follows') {
+    if (method === 'POST' && pathname === '/api/follows') {
       const body = await readBody(req)
       const authAddress = requireBearerAuth(req, res)
       if (!authAddress) return
@@ -1202,7 +1233,7 @@ export async function handleRequest(req, res) {
       return jsonResponse(res, 200, { ok: true })
     }
 
-    if (method === 'POST' && url.pathname === '/api/follows/remove') {
+    if (method === 'POST' && pathname === '/api/follows/remove') {
       const body = await readBody(req)
       const authAddress = requireBearerAuth(req, res)
       if (!authAddress) return
@@ -1217,7 +1248,7 @@ export async function handleRequest(req, res) {
       return jsonResponse(res, 200, { ok: true })
     }
 
-    if (method === 'GET' && url.pathname === '/api/follows/by-address') {
+    if (method === 'GET' && pathname === '/api/follows/by-address') {
       const address = (url.searchParams.get('address') ?? '').trim()
       const direction = (url.searchParams.get('direction') ?? 'following').trim()
       if (!address) return jsonResponse(res, 400, { error: 'address_required' })
@@ -1241,7 +1272,7 @@ export async function handleRequest(req, res) {
       return jsonResponse(res, 200, { items: rows })
     }
 
-    if (method === 'POST' && url.pathname === '/api/likes') {
+    if (method === 'POST' && pathname === '/api/likes') {
       const body = await readBody(req)
       const authAddress = requireBearerAuth(req, res)
       if (!authAddress) return
@@ -1261,7 +1292,7 @@ export async function handleRequest(req, res) {
       return jsonResponse(res, 200, { ok: true })
     }
 
-    if (method === 'POST' && url.pathname === '/api/likes/remove') {
+    if (method === 'POST' && pathname === '/api/likes/remove') {
       const body = await readBody(req)
       const authAddress = requireBearerAuth(req, res)
       if (!authAddress) return
@@ -1274,14 +1305,14 @@ export async function handleRequest(req, res) {
       return jsonResponse(res, 200, { ok: true })
     }
 
-    if (method === 'GET' && url.pathname === '/api/likes/by-post') {
+    if (method === 'GET' && pathname === '/api/likes/by-post') {
       const postId = (url.searchParams.get('postId') ?? '').trim()
       if (!postId) return jsonResponse(res, 400, { error: 'post_id_required' })
       const { rows } = await query(`SELECT COUNT(*)::int AS c FROM likes WHERE post_id = $1`, [postId])
       return jsonResponse(res, 200, { postId, likesCount: Number(rows[0]?.c ?? 0) })
     }
 
-    if (method === 'GET' && url.pathname === '/api/recommended') {
+    if (method === 'GET' && pathname === '/api/recommended') {
       const limit = parsePositiveInt(url.searchParams.get('limit') ?? '6', 6, 50)
       const since = nowMs() - 7 * 24 * 60 * 60 * 1000
       const { rows } = await query(

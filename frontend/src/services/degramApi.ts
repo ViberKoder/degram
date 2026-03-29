@@ -27,7 +27,12 @@ function apiOrigin(): string {
 
 function apiUrl(path: string): string {
   const o = apiOrigin()
-  return o ? `${o}${path}` : path
+  if (!o) return path
+  // VITE_API_URL must be origin only (e.g. https://app.vercel.app), not .../api
+  if (path.startsWith('/api/') && o.endsWith('/api')) {
+    return `${o.slice(0, -4)}${path}`
+  }
+  return `${o}${path}`
 }
 
 function safeParseJson(text: string): unknown {
